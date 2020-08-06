@@ -75,14 +75,30 @@ def group_time_steps_together(df, steps_to_group=3, has_company=True):
     result_df = pd.merge(result_df, min_dates, on='group').drop(columns=['group'])
     return result_df
 
-def linreg_jobpostings(df, y_col='Job Postings', normaliser=None):
-    if normaliser is None:
-        y = PolynomialFeatures(degree=2, include_bias=False).fit_transform(df[[y_col]].values)
+def linreg_jobpostings(df, y_col='Job Postings', normaliser=None, smooth='exp', log=True):
+    if smooth is not None:
+        if smooth == 'movingavg':
+            y = df[y_col].rolling(3).mean().values
+            y = y[2:]
+        elif smooth == 'exp':
+            y = df[[y_col]].ewm(alpha=0.8, adjust=False).mean().values
+        else:
+            y = df[[y_col]].values
     else:
-        y = PolynomialFeatures(degree=2, include_bias=False).fit_transform(df[[y_col]].values -
+        y = df[[y_col]].values
+    if normaliser is None:
+        y = PolynomialFeatures(degree=2, include_bias=False).fit_transform(y)
+    else:
+        if log:
+            y = PolynomialFeatures(degree=2, include_bias=False).fit_transform(y -
                                                                            normaliser[['Total']].values)
+        else:
+            y = PolynomialFeatures(degree=2, include_bias=False).fit_transform(y /
+                                                                               normaliser[['Total']].values)
     X = df[['Date']].values
     X = (X - X.min()).astype('timedelta64[D]') / np.timedelta64(1, 'D') / 30
+    if len(y) < len(X):
+        X = X[-len(y):]
     result_model = LinearRegression()
     result_model.fit(X, y) # Weighting the first point makes no conceptual sense because the 1st point isn't special.
     spike_value = y.max() / y.mean()
@@ -112,7 +128,8 @@ def compute_total_values(df):
     return df[['Date', 'Company', 'Total']].drop_duplicates().groupby('Date').\
                                                                 sum().reset_index()
 
-def logsum_trend_slope_wrapper(df, starting_date, end_date, total_log, min_freq=1, grouping=1, nafill='zero'):
+def logsum_trend_slope_wrapper(df, starting_date, end_date, total_log, min_freq=1, grouping=1,
+                               nafill='zero', nologtest=False):
     """
     Computes the dataframe containing the log sum trends (slope, intercept, acceleration, etc.) based on
     a skills dataframe. The starting dataframe needs to have the columns 'Date', 'Skill', and
@@ -123,7 +140,9 @@ def logsum_trend_slope_wrapper(df, starting_date, end_date, total_log, min_freq=
     print('End: ' + str(end_date))
     df = get_period_of_time(df, starting_date, end_date).copy()
     skills_raw_sums = df[['Skill', 'Job Postings Raw']].groupby('Skill').sum()
-    df['Job Postings'] = df['Job Postings Raw'].apply(lambda x: np.log(1+x))
+    if not nologtest:
+        df['Job Postings'] = df['Job Postings Raw'].apply(lambda x: np.log(1+x))
+
     df = df.groupby(['Date', 'Skill']).sum().reset_index()
 
     df_with_trends_pooled = pd.DataFrame(
@@ -139,17 +158,31 @@ def logsum_trend_slope_wrapper(df, starting_date, end_date, total_log, min_freq=
     print(df_with_trends_pooled.sort_values('Slope', ascending=False).describe())
     return df_with_trends_pooled.join(skills_raw_sums)
 
-def threshold_logsum_trends_simple(df_with_trends, total, slope_percentile_thresh = 0.95,
-                                   slope_thresh = None, pop_lower=0.001, pop_upper=0.01):
+def threshold_logsum_trends_simple(df_with_trends, total, col='Slope', col_percentile_thresh=.7, col_std_thresh=0,
+                                   only_positives = True,
+                                   pop_lower=0.001, pop_upper=0.01):
     pop_lower = pop_lower*total
     pop_upper = pop_upper*total
-    if slope_percentile_thresh is not None:
-        slope_thresh = df_with_trends.Slope.quantile(slope_percentile_thresh)
-    return df_with_trends.loc[(df_with_trends['Slope'] >= np.log(1+slope_thresh)) &
+
+    if only_positives:
+        df_with_trends = df_with_trends.loc[df_with_trends[col] > 0]
+
+    if col_percentile_thresh is None:
+        col_thresh = df_with_trends[col].mean() + col_std_thresh * df_with_trends[col].std()
+    else:
+        col_thresh = df_with_trends[col].quantile(col_percentile_thresh)
+
+    return df_with_trends.loc[(df_with_trends[col] >= col_thresh) &
                               (df_with_trends['Job Postings Raw'] >= pop_lower) &
                               (df_with_trends['Job Postings Raw'] < pop_upper)].reset_index()
 
-def compare_emerging_skill_sets(emerging_skills, dates):
+def merge_skill_with_score(df, skills, col, sort_type):
+    if sort_type == 'score':
+        return sorted([(skill, df.loc[df.Skill == skill, col].values[0]) for skill in skills], key=lambda x: -x[1])
+    else:
+        return sorted([(skill, df.loc[df.Skill == skill, col].values[0]) for skill in skills], key=lambda x: x[0])
+
+def compare_emerging_skill_sets(emerging_skills, dates, sort_type='score'):
     for i in range(len(emerging_skills)):
         for j in range(i+1,len(emerging_skills)):
             print('\nComparing ' + ' to '.join([str(dates[i][k]) for k in range(2)]) + ' with ' +
@@ -159,15 +192,18 @@ def compare_emerging_skill_sets(emerging_skills, dates):
                         set(emerging_skills[i].Skill.values).difference(set(emerging_skills[j].Skill.values))
             skills_exclusive_j = \
                         set(emerging_skills[j].Skill.values).difference(set(emerging_skills[i].Skill.values))
+            skills_shared = merge_skill_with_score(emerging_skills[i], skills_shared, 'Slope', sort_type)
+            skills_exclusive_i = merge_skill_with_score(emerging_skills[i], skills_exclusive_i, 'Slope', sort_type)
+            skills_exclusive_j = merge_skill_with_score(emerging_skills[j], skills_exclusive_j, 'Slope', sort_type)
             print('\n# of skills shared and exclusive to each date (in order)')
             print(len(skills_shared), len(skills_exclusive_i), len(skills_exclusive_j))
             print('\nThe skills themselves:')
             print('\nShared:' + '\n')
-            print(skills_shared)
+            print([x[0] for x in skills_shared])
             print('\nExclusive to '+ ' to '.join([str(dates[i][k]) for k in range(2)]) + '\n')
-            print(skills_exclusive_i)
+            print([x[0] for x in skills_exclusive_i])
             print('\nExclusive to '+ ' to '.join([str(dates[j][k]) for k in range(2)]) + '\n')
-            print(skills_exclusive_j)
+            print([x[0] for x in skills_exclusive_j])
 
 def compute_prec_recall(predicted_set, reference_set):
     predicted_set = predicted_set.Skill.values
