@@ -75,34 +75,33 @@ def group_time_steps_together(df, steps_to_group=3, has_company=True):
     result_df = pd.merge(result_df, min_dates, on='group').drop(columns=['group'])
     return result_df
 
-def linreg_jobpostings(df, y_col='Job Postings', normaliser=None, smooth='exp', log=True):
+def linreg_jobpostings(df, y_col='Job Postings', normaliser=None, smooth='exp', log=True, degree=2):
+    y = df[[y_col]].values
     if smooth is not None:
         if smooth == 'movingavg':
             y = df[y_col].rolling(3).mean().values
             y = y[2:]
         elif smooth == 'exp':
-            y = df[[y_col]].ewm(alpha=0.8, adjust=False).mean().values
-        else:
-            y = df[[y_col]].values
-    else:
-        y = df[[y_col]].values
-    if normaliser is None:
-        y = PolynomialFeatures(degree=2, include_bias=False).fit_transform(y)
-    else:
+            y = df[[y_col]].ewm(alpha=0.7, adjust=False).mean().values
+
+    if normaliser is not None:
         if log:
-            y = PolynomialFeatures(degree=2, include_bias=False).fit_transform(y -
-                                                                           normaliser[['Total']].values)
+            y = y - np.reshape(normaliser[['Total']].values, newshape=y.shape)
         else:
-            y = PolynomialFeatures(degree=2, include_bias=False).fit_transform(y /
-                                                                               normaliser[['Total']].values)
+            y = y / np.reshape(normaliser[['Total']].values, newshape=y.shape)
+
     X = df[['Date']].values
     X = (X - X.min()).astype('timedelta64[D]') / np.timedelta64(1, 'D') / 30
     if len(y) < len(X):
         X = X[-len(y):]
+    X = PolynomialFeatures(degree=degree, include_bias=False).fit_transform(X)
     result_model = LinearRegression()
     result_model.fit(X, y) # Weighting the first point makes no conceptual sense because the 1st point isn't special.
     spike_value = y.max() / y.mean()
-    return result_model.coef_[0][0], result_model.coef_[1][0], spike_value, result_model.intercept_[0]
+    if degree == 1:
+        return result_model.coef_[0][0], 0, spike_value, result_model.intercept_[0]
+    else:
+        return result_model.coef_[0][0], result_model.coef_[0][1], spike_value, result_model.intercept_[0]
 
 def get_trend_slope_intercept(group_col_and_trends):
     group_col_and_trends['Slope'] = group_col_and_trends[0].apply(lambda x: x[0] if not
@@ -220,3 +219,13 @@ def compute_prec_recall(predicted_set, reference_set):
         recall = 0
         f1 = 0
     return prec, recall, f1
+
+
+def get_responsible_companies(df, skill, time_periods, time_index):
+    filtered_df = get_period_of_time(df, time_periods[time_index][0], time_periods[time_index][1])
+    filtered_df = filtered_df.loc[(filtered_df.Skill == skill)]
+    return filtered_df[['Company', 'Skill', 'Job Postings Raw']].\
+                groupby(['Company', 'Skill']).sum().sort_values('Job Postings Raw', ascending=False)
+
+# def hits_on_companies(skills_df, seed_skills, weights=None):
+#     skills_df = skills_df.loc[]
