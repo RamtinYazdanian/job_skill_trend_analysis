@@ -75,21 +75,28 @@ def group_time_steps_together(df, steps_to_group=3, has_company=True):
     result_df = pd.merge(result_df, min_dates, on='group').drop(columns=['group'])
     return result_df
 
-def linreg_jobpostings(df, y_col='Job Postings', normaliser=None, smooth='exp', log=True, degree=2):
+def linreg_jobpostings(df, y_col='Job Postings', normaliser=None, smooth='exp', log=True, degree=1):
     y = df[[y_col]].values
     if smooth is not None:
         if smooth == 'movingavg':
-            y = df[y_col].rolling(3).mean().values
-            y = y[2:]
+            n = 3
+            y = df[y_col].rolling(n).mean().values
+            y = y[n-1:]
         elif smooth == 'exp':
-            y = df[[y_col]].ewm(alpha=0.7, adjust=False).mean().values
+            y = df[[y_col]].ewm(alpha=0.4, adjust=False).mean().values
 
     if normaliser is not None:
-        if log:
-            y = y - np.reshape(normaliser[['Total']].values, newshape=y.shape)
+        if smooth == 'movingavg':
+            normaliser = normaliser[['Total']].rolling(n).mean().values
+            normaliser = normaliser[n-1:]
+            normaliser = np.reshape(np.array(normaliser), newshape=y.shape)
         else:
-            y = y / np.reshape(normaliser[['Total']].values, newshape=y.shape)
-
+            normaliser = np.reshape(normaliser[['Total']].values, newshape=y.shape)
+        if log:
+            y = y - normaliser
+        else:
+            y = y / normaliser
+    y = y.flatten()
     X = df[['Date']].values
     X = (X - X.min()).astype('timedelta64[D]') / np.timedelta64(1, 'D') / 30
     if len(y) < len(X):
@@ -99,9 +106,16 @@ def linreg_jobpostings(df, y_col='Job Postings', normaliser=None, smooth='exp', 
     result_model.fit(X, y) # Weighting the first point makes no conceptual sense because the 1st point isn't special.
     spike_value = y.max() / y.mean()
     if degree == 1:
-        return result_model.coef_[0][0], 0, spike_value, result_model.intercept_[0]
+        if isinstance(result_model.intercept_, float):
+            return result_model.coef_[0], 0, spike_value, result_model.intercept_
+        else:
+            return result_model.coef_[0][0], 0, spike_value, result_model.intercept_[0]
+
     else:
-        return result_model.coef_[0][0], result_model.coef_[0][1], spike_value, result_model.intercept_[0]
+        if isinstance(result_model.intercept_, float):
+            return result_model.coef_[0], result_model.coef_[1], spike_value, result_model.intercept_
+        else:
+            return result_model.coef_[0][0], result_model.coef_[1][0], spike_value, result_model.intercept_[0]
 
 def get_trend_slope_intercept(group_col_and_trends):
     group_col_and_trends['Slope'] = group_col_and_trends[0].apply(lambda x: x[0] if not
@@ -128,7 +142,7 @@ def compute_total_values(df):
                                                                 sum().reset_index()
 
 def logsum_trend_slope_wrapper(df, starting_date, end_date, total_log, min_freq=1, grouping=1,
-                               nafill='zero', nologtest=False):
+                               nafill='zero', nologtest=False, smoothing='movingavg', degree=2):
     """
     Computes the dataframe containing the log sum trends (slope, intercept, acceleration, etc.) based on
     a skills dataframe. The starting dataframe needs to have the columns 'Date', 'Skill', and
@@ -152,7 +166,7 @@ def logsum_trend_slope_wrapper(df, starting_date, end_date, total_log, min_freq=
                                  groupby('Skill').apply(lambda x:
                                     linreg_jobpostings(x, normaliser=
                                            get_period_of_time(total_log, starting_date,
-                                                              end_date))))
+                                                              end_date), smooth=smoothing, degree=degree)))
     df_with_trends_pooled = get_trend_slope_intercept(df_with_trends_pooled)
     print(df_with_trends_pooled.sort_values('Slope', ascending=False).describe())
     return df_with_trends_pooled.join(skills_raw_sums)
@@ -181,7 +195,7 @@ def merge_skill_with_score(df, skills, col, sort_type):
     else:
         return sorted([(skill, df.loc[df.Skill == skill, col].values[0]) for skill in skills], key=lambda x: x[0])
 
-def compare_emerging_skill_sets(emerging_skills, dates, sort_type='score'):
+def compare_emerging_skill_sets(emerging_skills, dates, sort_type='score', sort_col='Slope'):
     for i in range(len(emerging_skills)):
         for j in range(i+1,len(emerging_skills)):
             print('\nComparing ' + ' to '.join([str(dates[i][k]) for k in range(2)]) + ' with ' +
@@ -191,9 +205,9 @@ def compare_emerging_skill_sets(emerging_skills, dates, sort_type='score'):
                         set(emerging_skills[i].Skill.values).difference(set(emerging_skills[j].Skill.values))
             skills_exclusive_j = \
                         set(emerging_skills[j].Skill.values).difference(set(emerging_skills[i].Skill.values))
-            skills_shared = merge_skill_with_score(emerging_skills[i], skills_shared, 'Slope', sort_type)
-            skills_exclusive_i = merge_skill_with_score(emerging_skills[i], skills_exclusive_i, 'Slope', sort_type)
-            skills_exclusive_j = merge_skill_with_score(emerging_skills[j], skills_exclusive_j, 'Slope', sort_type)
+            skills_shared = merge_skill_with_score(emerging_skills[i], skills_shared, sort_col, sort_type)
+            skills_exclusive_i = merge_skill_with_score(emerging_skills[i], skills_exclusive_i, sort_col, sort_type)
+            skills_exclusive_j = merge_skill_with_score(emerging_skills[j], skills_exclusive_j, sort_col, sort_type)
             print('\n# of skills shared and exclusive to each date (in order)')
             print(len(skills_shared), len(skills_exclusive_i), len(skills_exclusive_j))
             print('\nThe skills themselves:')
@@ -205,6 +219,7 @@ def compare_emerging_skill_sets(emerging_skills, dates, sort_type='score'):
             print([x[0] for x in skills_exclusive_j])
 
 def compute_prec_recall(predicted_set, reference_set):
+    predicted_set = predicted_set.drop_duplicates(subset=['Skill'])
     predicted_set = predicted_set.Skill.values
     reference_set = reference_set.Skill.values
     accurately_predicted = set(reference_set).intersection(set(predicted_set))
@@ -213,7 +228,10 @@ def compute_prec_recall(predicted_set, reference_set):
     if len(predicted_set) > 0:
         prec = len(accurately_predicted) / len(predicted_set)
         recall = len(accurately_predicted) / len(reference_set)
-        f1 = 2*prec*recall / (prec+recall)
+        if prec != 0 and recall != 0:
+            f1 = 2*prec*recall / (prec+recall)
+        else:
+            f1 = 0
     else:
         prec = 0
         recall = 0
@@ -227,5 +245,36 @@ def get_responsible_companies(df, skill, time_periods, time_index):
     return filtered_df[['Company', 'Skill', 'Job Postings Raw']].\
                 groupby(['Company', 'Skill']).sum().sort_values('Job Postings Raw', ascending=False)
 
-# def hits_on_companies(skills_df, seed_skills, weights=None):
-#     skills_df = skills_df.loc[]
+def get_skills_by_threshold(skill_trends, total_values,
+                            score_col, score_thresholds, pop_lower_bounds, pop_upper_bounds):
+    # This function requires each list of thresholds to be progressively *less* restrictive.
+    df_results = list()
+    set_results = list()
+
+    counter = 0
+    for score_thresh in score_thresholds:
+        for pop_lower in pop_lower_bounds:
+            for pop_upper in pop_upper_bounds:
+                    counter += 1
+                    new_df = threshold_logsum_trends_simple(skill_trends, total=total_values, col=score_col,
+                                   only_positives=True,
+                                   col_percentile_thresh=score_thresh, pop_lower=pop_lower, pop_upper=pop_upper)
+                    new_set = set(new_df.Skill.values)
+                    for existing_set in set_results:
+                        new_set = new_set.difference(existing_set)
+
+                    new_df = new_df.loc[new_df.Skill.apply(lambda x: x in new_set)]
+                    new_df['Params'] = [tuple([score_thresh, pop_lower, pop_upper])]*new_df.shape[0]
+                    new_df['Set#'] = counter
+
+                    df_results.append(new_df)
+                    set_results.append(new_set)
+
+    return pd.concat(df_results).sort_values('Set#').reset_index().drop(columns=['index']), set_results
+
+def get_set_of_companies(df, companies):
+    return df.loc[df.Company.apply(lambda x: x in companies)].copy()
+
+def hits_on_companies(skills_df, seed_skills, weights=None):
+    skills_df = skills_df.loc[skills_df.Skill.apply(lambda x: x in seed_skills)]
+
