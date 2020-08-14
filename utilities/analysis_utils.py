@@ -273,8 +273,51 @@ def get_skills_by_threshold(skill_trends, total_values,
     return pd.concat(df_results).sort_values('Set#').reset_index().drop(columns=['index']), set_results
 
 def get_set_of_companies(df, companies):
-    return df.loc[df.Company.apply(lambda x: x in companies)].copy()
+    result = df.loc[df.Company.apply(lambda x: x in companies)].copy()
+    return result
 
-def hits_on_companies(skills_df, seed_skills, weights=None):
-    skills_df = skills_df.loc[skills_df.Skill.apply(lambda x: x in seed_skills)]
+def hits_on_companies(skills_df, seed_skills, binarise=True, max_iter=20, tol=0.0001, weights=None):
+    # This needs to be run on a specific time slice of the skills df (e.g. 2018-2019).
+    skills_df = skills_df.loc[skills_df.Skill.apply(lambda x: x in seed_skills), ['Skill', 'Company']]
+    if binarise:
+        skills_df = skills_df.drop_duplicates()
+    companies_only_df = skills_df[['Company']].drop_duplicates()
+    companies_only_df['Score'] = 1
+    skills_only_df = skills_df[['Skill']].drop_duplicates()
+    skills_only_df['Score'] = 1
+
+    finished = False
+    iter_count = 0
+    skill_total = 0
+    company_total = 0
+
+    while not finished:
+        iter_count += 1
+        # Authority update
+        companies_only_new = pd.merge(skills_df, skills_only_df, on='Skill').groupby('Company').sum().reset_index()
+        company_total_new = np.sqrt(companies_only_new['Score'].apply(lambda x: x**2).sum())
+        companies_only_new['Score'] = companies_only_new['Score'] / company_total_new
+
+        # Hub update
+        skills_only_new = pd.merge(skills_df, companies_only_df, on='Company').groupby('Skill').sum().reset_index()
+        skill_total_new = np.sqrt(skills_only_new['Score'].apply(lambda x: x ** 2).sum())
+        skills_only_new['Score'] = skills_only_new['Score'] / skill_total_new
+
+        # Assigning new values
+        skills_only_df = skills_only_new
+        companies_only_df = companies_only_new
+
+        # Checking max iter count and relative change in total company and skill scores
+        if iter_count >= max_iter:
+            finished = True
+        if (abs(company_total_new - company_total) + abs(skill_total_new - skill_total)) / \
+            (company_total_new + skill_total_new) < tol:
+            finished = True
+
+        # Saving current skill and company total values
+        skill_total = skill_total_new
+        company_total = company_total_new
+
+    return skills_only_df, companies_only_df
+
 
