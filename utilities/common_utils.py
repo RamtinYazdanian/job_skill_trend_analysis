@@ -14,3 +14,9 @@ def make_sure_path_exists(path):
 def invert_dict(d):
     return {d[k]: k for k in d}
 
+def capitalise_initials(s):
+    if ' ' not in s:
+        return s[0].upper() + s[1:].lower()
+    l = s.lower().split(' ')
+    return ' '.join([capitalise_initials(l[0])] + l[1:])
+

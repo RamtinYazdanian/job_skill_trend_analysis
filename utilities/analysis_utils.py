@@ -168,14 +168,23 @@ def logsum_trend_slope_wrapper(df, starting_date, end_date, total_log, min_freq=
                                            get_period_of_time(total_log, starting_date,
                                                               end_date), smooth=smoothing, degree=degree)))
     df_with_trends_pooled = get_trend_slope_intercept(df_with_trends_pooled)
-    print(df_with_trends_pooled.sort_values('Slope', ascending=False).describe())
+    print(df_with_trends_pooled.describe())
     return df_with_trends_pooled.join(skills_raw_sums)
 
 def threshold_logsum_trends_simple(df_with_trends, total, col='Slope', col_percentile_thresh=.7, col_std_thresh=0,
                                    only_positives = True,
-                                   pop_lower=0.001, pop_upper=0.01):
-    pop_lower = pop_lower*total
-    pop_upper = pop_upper*total
+                                   pop_lower=0.001, pop_upper=0.01,
+                                   pop_lower_percentile=0.5, pop_upper_percentile=0.9):
+    if pop_lower_percentile is None and pop_upper_percentile is None:
+        pop_lower = pop_lower*total
+        pop_upper = pop_upper*total
+    else:
+        if pop_lower_percentile is None:
+            pop_lower_percentile = 0
+        if pop_upper_percentile is None:
+            pop_upper_percentile = 1
+        pop_lower = df_with_trends['Job Postings Raw'].quantile(pop_lower_percentile)
+        pop_upper = df_with_trends['Job Postings Raw'].quantile(pop_upper_percentile)
 
     if only_positives:
         df_with_trends = df_with_trends.loc[df_with_trends[col] > 0]
@@ -195,16 +204,23 @@ def merge_skill_with_score(df, skills, col, sort_type):
     else:
         return sorted([(skill, df.loc[df.Skill == skill, col].values[0]) for skill in skills], key=lambda x: x[0])
 
+def get_set_intersection_and_diff(set_1, set_2):
+    shared_values = set(set_1).intersection(set(set_2))
+    exclusive_1 = \
+        set(set_1).difference(set(set_2))
+    exclusive_2 = \
+        set(set_2).difference(set(set_1))
+    return exclusive_1, exclusive_2, shared_values
+
+
 def compare_emerging_skill_sets(emerging_skills, dates, sort_type='score', sort_col='Slope'):
     for i in range(len(emerging_skills)):
         for j in range(i+1,len(emerging_skills)):
             print('\nComparing ' + ' to '.join([str(dates[i][k]) for k in range(2)]) + ' with ' +
                                             ' to '.join([str(dates[j][k]) for k in range(2)]))
-            skills_shared = set(emerging_skills[i].Skill.values).intersection(set(emerging_skills[j].Skill.values))
-            skills_exclusive_i = \
-                        set(emerging_skills[i].Skill.values).difference(set(emerging_skills[j].Skill.values))
-            skills_exclusive_j = \
-                        set(emerging_skills[j].Skill.values).difference(set(emerging_skills[i].Skill.values))
+            skills_i = emerging_skills[i].Skill.values
+            skills_j = emerging_skills[j].Skill.values
+            skills_exclusive_i, skills_exclusive_j, skills_shared = get_set_intersection_and_diff(skills_i, skills_j)
             skills_shared = merge_skill_with_score(emerging_skills[i], skills_shared, sort_col, sort_type)
             skills_exclusive_i = merge_skill_with_score(emerging_skills[i], skills_exclusive_i, sort_col, sort_type)
             skills_exclusive_j = merge_skill_with_score(emerging_skills[j], skills_exclusive_j, sort_col, sort_type)
@@ -218,12 +234,15 @@ def compare_emerging_skill_sets(emerging_skills, dates, sort_type='score', sort_
             print('\nExclusive to '+ ' to '.join([str(dates[j][k]) for k in range(2)]) + '\n')
             print([x[0] for x in skills_exclusive_j])
 
+
 def compute_prec_recall(predicted_set, reference_set):
     predicted_set = predicted_set.drop_duplicates(subset=['Skill'])
     predicted_set = predicted_set.Skill.values
     reference_set = reference_set.Skill.values
     accurately_predicted = set(reference_set).intersection(set(predicted_set))
+    print('\nCorrectly predicted skills:')
     print(accurately_predicted)
+    print('\nNumber of correctly predicted skills, all predicted positives, and true positives:')
     print(len(accurately_predicted), len(predicted_set), len(reference_set))
     if len(predicted_set) > 0:
         prec = len(accurately_predicted) / len(predicted_set)
@@ -246,7 +265,7 @@ def get_responsible_companies(df, skill, time_periods, time_index):
                 groupby(['Company', 'Skill']).sum().sort_values('Job Postings Raw', ascending=False)
 
 def get_skills_by_threshold(skill_trends, total_values,
-                            score_col, score_thresholds, pop_lower_bounds, pop_upper_bounds):
+                            score_col, score_thresholds, pop_lower_bounds, pop_upper_bounds, sample=None):
     # This function requires each list of thresholds to be progressively *less* restrictive.
     df_results = list()
     set_results = list()
@@ -258,7 +277,8 @@ def get_skills_by_threshold(skill_trends, total_values,
                     counter += 1
                     new_df = threshold_logsum_trends_simple(skill_trends, total=total_values, col=score_col,
                                    only_positives=True,
-                                   col_percentile_thresh=score_thresh, pop_lower=pop_lower, pop_upper=pop_upper)
+                                   col_percentile_thresh=score_thresh,
+                                   pop_lower_percentile=pop_lower, pop_upper_percentile=pop_upper)
                     new_set = set(new_df.Skill.values)
                     for existing_set in set_results:
                         new_set = new_set.difference(existing_set)
@@ -266,6 +286,13 @@ def get_skills_by_threshold(skill_trends, total_values,
                     new_df = new_df.loc[new_df.Skill.apply(lambda x: x in new_set)]
                     new_df['Params'] = [tuple([score_thresh, pop_lower, pop_upper])]*new_df.shape[0]
                     new_df['Set#'] = counter
+
+                    if sample is not None and new_df.shape[0] > 0:
+                        if sample < 1 and sample > 0:
+                            new_df = new_df.sample(frac=sample)
+                        elif sample >= 1:
+                            new_df = new_df.sample(n=min([sample, new_df.shape[0]]))
+                        new_set = set(new_df.Skill.values.tolist())
 
                     df_results.append(new_df)
                     set_results.append(new_set)
@@ -278,6 +305,9 @@ def get_set_of_companies(df, companies):
 
 def hits_on_companies(skills_df, seed_skills, binarise=True, max_iter=20, tol=0.0001, weights=None):
     # This needs to be run on a specific time slice of the skills df (e.g. 2018-2019).
+    if not isinstance(seed_skills, set) and not isinstance(seed_skills, list):
+        # then it's a dataframe
+        seed_skills = set(seed_skills.Skill.values.tolist())
     skills_df = skills_df.loc[skills_df.Skill.apply(lambda x: x in seed_skills), ['Skill', 'Company']]
     if binarise:
         skills_df = skills_df.drop_duplicates()
@@ -293,15 +323,16 @@ def hits_on_companies(skills_df, seed_skills, binarise=True, max_iter=20, tol=0.
 
     while not finished:
         iter_count += 1
-        # Authority update
-        companies_only_new = pd.merge(skills_df, skills_only_df, on='Skill').groupby('Company').sum().reset_index()
-        company_total_new = np.sqrt(companies_only_new['Score'].apply(lambda x: x**2).sum())
-        companies_only_new['Score'] = companies_only_new['Score'] / company_total_new
 
-        # Hub update
+        # Authority update
         skills_only_new = pd.merge(skills_df, companies_only_df, on='Company').groupby('Skill').sum().reset_index()
         skill_total_new = np.sqrt(skills_only_new['Score'].apply(lambda x: x ** 2).sum())
         skills_only_new['Score'] = skills_only_new['Score'] / skill_total_new
+
+        # Hub update
+        companies_only_new = pd.merge(skills_df, skills_only_df, on='Skill').groupby('Company').sum().reset_index()
+        company_total_new = np.sqrt(companies_only_new['Score'].apply(lambda x: x ** 2).sum())
+        companies_only_new['Score'] = companies_only_new['Score'] / company_total_new
 
         # Assigning new values
         skills_only_df = skills_only_new
@@ -320,4 +351,41 @@ def hits_on_companies(skills_df, seed_skills, binarise=True, max_iter=20, tol=0.
 
     return skills_only_df, companies_only_df
 
+def remove_outliers(s):
+#     return s.loc[(s<s.mean()+10*s.std()) & (s>s.mean()-10*s.std())]
+    return s
+
+def get_hybrid_score(df, cols, weights=None):
+    if weights is None:
+        weights = [1]*len(cols)
+    return sum([weights[i]*np.log(1+(df[cols[i]] - remove_outliers(df[cols[i]]).min())/
+                                  (remove_outliers(df[cols[i]]).max()-
+                                   remove_outliers(df[cols[i]]).min()))
+                if df[cols[i]].max() - df[cols[i]].min() > 0 else 0
+                for i in range(len(cols)) ])
+
+def get_top_n_companies_from_hits(skills_df, seed_skills, binarise=True, max_iter=20, tol=0.0001, weights=None, n=30):
+    skills, companies = hits_on_companies(skills_df, seed_skills, binarise, max_iter, tol, weights)
+    return companies.sort_values('Score', ascending=False).head(n).Company.values.tolist(), skills, companies
+
+def company_emerging_skill_wrapper(skills_df, set_of_companies, start_and_end_dates):
+    companies_skills = get_set_of_companies(skills_df, set_of_companies)
+    companies_skill_trends = [logsum_trend_slope_wrapper(companies_skills,
+                                                                     start_and_end_dates[i][0],
+                                                                     start_and_end_dates[i][1],
+                                                                     compute_total_log_mean(
+                                                                         companies_skills))
+                                          for i in range(len(start_and_end_dates))]
+    for skill_trend_df in companies_skill_trends:
+        skill_trend_df['HybridScore'] = get_hybrid_score(skill_trend_df,
+                                                         ['Slope', 'Acceleration'], weights=[1, 1])
+    companies_emerging_skills = [threshold_logsum_trends_simple(
+        companies_skill_trends[i], col='HybridScore',
+        only_positives=True,
+        col_percentile_thresh=.75, pop_lower=0.001, pop_upper=0.01,
+        total=get_period_of_time(compute_total_values(companies_skills),
+                                 start_and_end_dates[i][0], start_and_end_dates[i][1]).sum()[0])
+        for i in range(len(companies_skill_trends))]
+
+    return companies_emerging_skills, companies_skill_trends
 
