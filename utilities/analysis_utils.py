@@ -3,6 +3,7 @@ import numpy as np
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PolynomialFeatures
 from utilities.pandas_utils import get_period_of_time
+from utilities.constants import *
 
 def divide_into_periods(df, cols, start_date=None, end_date=None, result_col_name='Count'):
     df = get_period_of_time(df, start_date, end_date).copy()
@@ -75,23 +76,23 @@ def group_time_steps_together(df, steps_to_group=3, has_company=True):
     result_df = pd.merge(result_df, min_dates, on='group').drop(columns=['group'])
     return result_df
 
-def linreg_jobpostings(df, y_col='Job Postings', normaliser=None, smooth='exp', log=True, degree=1):
+def preprocess_trend_x_and_y(df, log, normaliser, smooth, y_col):
     y = df[[y_col]].values
     if smooth is not None:
         if smooth == 'movingavg':
-            n = 3
-            y = df[y_col].rolling(n).mean().values
-            y = y[n-1:]
+            y = df[y_col].rolling(SMOOTH_N).mean().values
+            y = y[SMOOTH_N - 1:]
         elif smooth == 'exp':
-            y = df[[y_col]].ewm(alpha=0.4, adjust=False).mean().values
-
+            y = df[[y_col]].ewm(alpha=SMOOTH_ALPHA, adjust=False).mean().values
     if normaliser is not None:
-        if smooth == 'movingavg':
-            normaliser = normaliser[['Total']].rolling(n).mean().values
-            normaliser = normaliser[n-1:]
-            normaliser = np.reshape(np.array(normaliser), newshape=y.shape)
-        else:
-            normaliser = np.reshape(normaliser[['Total']].values, newshape=y.shape)
+        if smooth is not None:
+            if smooth == 'movingavg':
+                normaliser = normaliser[['Total']].rolling(SMOOTH_N).mean().values
+                normaliser = normaliser[SMOOTH_N - 1:]
+                normaliser = np.reshape(np.array(normaliser), newshape=y.shape)
+            elif smooth == 'exp':
+                normaliser = normaliser[['Total']].ewm(alpha=SMOOTH_ALPHA, adjust=False).mean().values
+                np.reshape(normaliser[['Total']].values, newshape=y.shape)
         if log:
             y = y - normaliser
         else:
@@ -101,33 +102,117 @@ def linreg_jobpostings(df, y_col='Job Postings', normaliser=None, smooth='exp', 
     X = (X - X.min()).astype('timedelta64[D]') / np.timedelta64(1, 'D') / 30
     if len(y) < len(X):
         X = X[-len(y):]
+    return X, y
+
+def linreg_jobpostings(df, y_col='Job Postings', normaliser=None, smooth='exp', log=True, degree=2):
+    X, y = preprocess_trend_x_and_y(df, log, normaliser, smooth, y_col)
     X = PolynomialFeatures(degree=degree, include_bias=False).fit_transform(X)
     result_model = LinearRegression()
     result_model.fit(X, y) # Weighting the first point makes no conceptual sense because the 1st point isn't special.
     spike_value = y.max() / y.mean()
     if degree == 1:
         if isinstance(result_model.intercept_, float):
-            return result_model.coef_[0], 0, spike_value, result_model.intercept_
+            return np.array([result_model.coef_[0], 0,
+                             spike_value, result_model.intercept_])
         else:
-            return result_model.coef_[0][0], 0, spike_value, result_model.intercept_[0]
-
+            return np.array([result_model.coef_[0][0], 0,
+                             spike_value, result_model.intercept_[0]])
     else:
         if isinstance(result_model.intercept_, float):
-            return result_model.coef_[0], result_model.coef_[1], spike_value, result_model.intercept_
+            return np.array([result_model.coef_[0], result_model.coef_[1],
+                             spike_value, result_model.intercept_])
         else:
-            return result_model.coef_[0][0], result_model.coef_[1][0], spike_value, result_model.intercept_[0]
+            return np.array([result_model.coef_[0][0], result_model.coef_[1][0],
+                             spike_value, result_model.intercept_[0]])
 
-def get_trend_slope_intercept(group_col_and_trends):
-    group_col_and_trends['Slope'] = group_col_and_trends[0].apply(lambda x: x[0] if not
-                                                                               pd.isna(x) else np.nan)
-    group_col_and_trends['Intercept'] = group_col_and_trends[0].apply(lambda x: x[3] if not
-                                                                               pd.isna(x) else np.nan)
-    group_col_and_trends['Acceleration'] = group_col_and_trends[0].apply(lambda x: x[1] if not
-                                                                               pd.isna(x) else np.nan)
-    group_col_and_trends['Spikiness'] = group_col_and_trends[0].apply(lambda x: x[2] if not
-                                                                               pd.isna(x) else np.nan)
-    group_col_and_trends = group_col_and_trends.drop(columns=0)
+
+def extract_timeseries_features(df, y_col='Job Postings', extraction_method='linreg',
+                                normaliser=None, smooth='exp', params=None):
+    """
+    :param df: The groupby dataframe that has the time series for one skill.
+    :param y_col: The output column (the input is 'Date' by default)
+    :param extraction_method: The type of feature extraction. Supported modes are 'linreg' and 'full'.
+    :param normaliser: The dataframe used to normalise the output.
+    :param smooth: Smoothing method (None, 'exp', or 'movingavg')
+    :param params: Parameters specific to the feature extraction method. These are as follows:
+            For all methods:
+                'log': Whether the normalisation is logarithmic (subtraction) or not (division)
+                'pop_type': Whether the type of popularity used (as the output variable) was log, bin, or raw
+            For lingreg:
+                'degree': The degree of the polynomial fitted.
+
+            Method-specific parameters should already be provided in the dict given to the wrapper function.
+    :return:
+    """
+    if extraction_method == 'linreg':
+        return linreg_jobpostings(df, y_col=y_col, normaliser=normaliser, smooth=smooth,
+                                  log=params['log'], degree=params['degree'])
+    elif extraction_method == 'full':
+        pass
+
+
+
+def get_trend_slope_intercept(group_col_and_trends, feature_names):
+    for i in range(len(feature_names)):
+        feature_name = feature_names[i]
+        group_col_and_trends[feature_name] = group_col_and_trends['Features'].apply(lambda x: x[i] if not
+                                                                                   pd.isna(x) else np.nan)
     return group_col_and_trends
+
+
+def skill_trend_features_wrapper(df, starting_date, end_date, total_log, min_freq=1, grouping=1, feature_type='linreg',
+                                 nafill='zero', pop_type='log', smoothing='movingavg', params=None, weights=None):
+    """
+    Computes the dataframe containing the log sum trends (slope, intercept, acceleration, etc.) based on
+    a skills dataframe. The starting dataframe needs to have the columns 'Date', 'Skill', and
+    'Job Postings Raw', and needs to be company-level. The log of the company-level values is taken,
+    and then they are summed up, grouped by skill and date.
+    """
+    assert pop_type in ['log', 'bin', 'raw']
+
+    if params is None:
+        params = dict()
+
+    params['type'] = pop_type
+
+    print('Start: ' + str(starting_date))
+    print('End: ' + str(end_date))
+    df = get_period_of_time(df, starting_date, end_date).copy()
+    skills_raw_sums = df[['Skill', 'Job Postings Raw']].groupby('Skill').sum()
+
+    # Using logpop, binpop, or rawpop.
+    if pop_type == 'log':
+        # log popularity: The per-date company-level value for each skill is log(1+nAds_skill_t)
+        df['Job Postings'] = df['Job Postings Raw'].apply(lambda x: np.log(1+x))
+        params['log'] = True
+    elif pop_type == 'bin':
+        # bin popularity: The per-date company-level value for each skill is 1
+        df['Job Postings'] = 1
+        params['log'] = False
+    elif pop_type == 'raw':
+        # raw popularity: The per-date company-level value for each skill is te raw value, nAds_skill_t
+        df['Job Postings'] = df['Job Postings Raw']
+        params['log'] = False
+
+    df = df.groupby(['Date', 'Skill']).sum().reset_index()
+
+    df_with_trends_pooled = pd.DataFrame(
+        fill_in_the_blank_dates(
+            group_time_steps_together(
+                delete_low_freq_skills(df, min_freq),
+                            steps_to_group=grouping, has_company=False), method=nafill, has_company=False).
+                                 groupby('Skill').apply(lambda x:
+                                    extract_timeseries_features(x, extraction_method=feature_type, normaliser=
+                                           get_period_of_time(total_log, starting_date,
+                                                              end_date), smooth=smoothing, params=params)))
+
+    df_with_trends_pooled = df_with_trends_pooled.rename(columns={0: 'Features'})
+    if feature_type == 'linreg':
+        df_with_trends_pooled = get_trend_slope_intercept(df_with_trends_pooled, feature_names=LINREG_FEATURES)
+    if weights is not None:
+        df_with_trends_pooled['HybridScore'] = df_with_trends_pooled['Features'].apply(lambda x: np.dot(x, weights))
+    print(df_with_trends_pooled.describe())
+    return df_with_trends_pooled.join(skills_raw_sums)
 
 def compute_total_log_mean(df):
     """
@@ -141,40 +226,29 @@ def compute_total_values(df):
     return df[['Date', 'Company', 'Total']].drop_duplicates().groupby('Date').\
                                                                 sum().reset_index()
 
-def logsum_trend_slope_wrapper(df, starting_date, end_date, total_log, min_freq=1, grouping=1,
-                               nafill='zero', nologtest=False, smoothing='movingavg', degree=2):
+def threshold_logsum_trends_simple(df_with_trends, col='Slope', pop_col='Job Postings Raw',
+                                   col_percentile_thresh=.7, col_std_thresh=0,
+                                   only_positives = False,
+                                   pop_lower_percentile=0.5, pop_upper_percentile=0.9,
+                                   pop_lower=0.001, pop_upper=0.01, total=None):
     """
-    Computes the dataframe containing the log sum trends (slope, intercept, acceleration, etc.) based on
-    a skills dataframe. The starting dataframe needs to have the columns 'Date', 'Skill', and
-    'Job Postings Raw', and needs to be company-level. The log of the company-level values is taken,
-    and then they are summed up, grouped by skill and date.
+    :param df_with_trends: Dataframe that has one row per skill, with that skill's score and popularity
+            during the time period in question.
+    :param col: The name of the score column.
+    :param pop_col: The name of the popularity column.
+    :param col_percentile_thresh: Percentile threshold on score col for inclusion in emerging skills. Mutually
+            exclusive with col_std_thresh.
+    :param col_std_thresh: If col_percentile_thresh is None, then the threshold for emergingness
+            is mean + col_std_thresh*std.
+    :param only_positives: Whether to discard the negative part of the distribution. False by default.
+    :param pop_lower_percentile: Upper bound percentile for Job Postings Raw.
+    :param pop_upper_percentile: Lower bound percentile for Job Postings Raw.
+    :param pop_lower: Only if both the percentile thresholds are None, this is a percentage of total lower bound.
+    :param pop_upper: Only if both the percentile thresholds are None, this is a percentage of total upper bound.
+    :param total: Total number of ads in the time period, only applicable for pop_lower and pop_upper.
+
+    :return: The rows of the original Dataframe that correspond to emerging skills per the criteria provided.
     """
-    print('Start: ' + str(starting_date))
-    print('End: ' + str(end_date))
-    df = get_period_of_time(df, starting_date, end_date).copy()
-    skills_raw_sums = df[['Skill', 'Job Postings Raw']].groupby('Skill').sum()
-    if not nologtest:
-        df['Job Postings'] = df['Job Postings Raw'].apply(lambda x: np.log(1+x))
-
-    df = df.groupby(['Date', 'Skill']).sum().reset_index()
-
-    df_with_trends_pooled = pd.DataFrame(
-        fill_in_the_blank_dates(
-            group_time_steps_together(
-                delete_low_freq_skills(df, min_freq),
-                            steps_to_group=grouping, has_company=False), method=nafill, has_company=False).
-                                 groupby('Skill').apply(lambda x:
-                                    linreg_jobpostings(x, normaliser=
-                                           get_period_of_time(total_log, starting_date,
-                                                              end_date), smooth=smoothing, degree=degree)))
-    df_with_trends_pooled = get_trend_slope_intercept(df_with_trends_pooled)
-    print(df_with_trends_pooled.describe())
-    return df_with_trends_pooled.join(skills_raw_sums)
-
-def threshold_logsum_trends_simple(df_with_trends, total, col='Slope', col_percentile_thresh=.7, col_std_thresh=0,
-                                   only_positives = True,
-                                   pop_lower=0.001, pop_upper=0.01,
-                                   pop_lower_percentile=0.5, pop_upper_percentile=0.9):
     if pop_lower_percentile is None and pop_upper_percentile is None:
         pop_lower = pop_lower*total
         pop_upper = pop_upper*total
@@ -183,8 +257,8 @@ def threshold_logsum_trends_simple(df_with_trends, total, col='Slope', col_perce
             pop_lower_percentile = 0
         if pop_upper_percentile is None:
             pop_upper_percentile = 1
-        pop_lower = df_with_trends['Job Postings Raw'].quantile(pop_lower_percentile)
-        pop_upper = df_with_trends['Job Postings Raw'].quantile(pop_upper_percentile)
+        pop_lower = df_with_trends[pop_col].quantile(pop_lower_percentile)
+        pop_upper = df_with_trends[pop_col].quantile(pop_upper_percentile)
 
     if only_positives:
         df_with_trends = df_with_trends.loc[df_with_trends[col] > 0]
@@ -195,8 +269,8 @@ def threshold_logsum_trends_simple(df_with_trends, total, col='Slope', col_perce
         col_thresh = df_with_trends[col].quantile(col_percentile_thresh)
 
     return df_with_trends.loc[(df_with_trends[col] >= col_thresh) &
-                              (df_with_trends['Job Postings Raw'] >= pop_lower) &
-                              (df_with_trends['Job Postings Raw'] < pop_upper)].reset_index()
+                              (df_with_trends[pop_col] >= pop_lower) &
+                              (df_with_trends[pop_col] < pop_upper)].reset_index()
 
 def merge_skill_with_score(df, skills, col, sort_type):
     if sort_type == 'score':
@@ -370,12 +444,12 @@ def get_top_n_companies_from_hits(skills_df, seed_skills, binarise=True, max_ite
 
 def company_emerging_skill_wrapper(skills_df, set_of_companies, start_and_end_dates):
     companies_skills = get_set_of_companies(skills_df, set_of_companies)
-    companies_skill_trends = [logsum_trend_slope_wrapper(companies_skills,
-                                                                     start_and_end_dates[i][0],
-                                                                     start_and_end_dates[i][1],
-                                                                     compute_total_log_mean(
+    companies_skill_trends = [skill_trend_features_wrapper(companies_skills,
+                                                           start_and_end_dates[i][0],
+                                                           start_and_end_dates[i][1],
+                                                           compute_total_log_mean(
                                                                          companies_skills))
-                                          for i in range(len(start_and_end_dates))]
+                              for i in range(len(start_and_end_dates))]
     for skill_trend_df in companies_skill_trends:
         skill_trend_df['HybridScore'] = get_hybrid_score(skill_trend_df,
                                                          ['Slope', 'Acceleration'], weights=[1, 1])
