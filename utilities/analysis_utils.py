@@ -204,7 +204,7 @@ def skill_trend_features_wrapper(df, starting_date, end_date, total_log, min_fre
                                  groupby('Skill').apply(lambda x:
                                     extract_timeseries_features(x, extraction_method=feature_type, normaliser=
                                            get_period_of_time(total_log, starting_date,
-                                                              end_date), smooth=smoothing, params=params)))
+                                              end_date), smooth=smoothing, params=params)))
 
     df_with_trends_pooled = df_with_trends_pooled.rename(columns={0: 'Features'})
     if feature_type == 'linreg':
