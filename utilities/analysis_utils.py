@@ -76,7 +76,18 @@ def group_time_steps_together(df, steps_to_group=3, has_company=True):
     result_df = pd.merge(result_df, min_dates, on='group').drop(columns=['group'])
     return result_df
 
-def preprocess_trend_x_and_y(df, log, normaliser, smooth, y_col):
+def smooth_and_normalise_timeseries(df, log, normaliser, smooth, y_col, date_to_step=True, return_df=False):
+    """
+    Performs smoothing and normalisation on the output values and converts the dates into input values.
+    :param df:
+    :param log:
+    :param normaliser:
+    :param smooth:
+    :param y_col:
+    :return:
+    """
+
+    # Normalising and smoothing y
     y = df[[y_col]].values
     if smooth is not None:
         if smooth == 'movingavg':
@@ -98,14 +109,24 @@ def preprocess_trend_x_and_y(df, log, normaliser, smooth, y_col):
         else:
             y = y / normaliser
     y = y.flatten()
+
+    # Turning X into steps rather than dates
     X = df[['Date']].values
-    X = (X - X.min()).astype('timedelta64[D]') / np.timedelta64(1, 'D') / 30
+    if date_to_step:
+        X = (X - X.min()).astype('timedelta64[D]') / np.timedelta64(1, 'D') / 30
+
+    # Making sure X and y have the same length (moving avg smoothing will shorten y)
     if len(y) < len(X):
         X = X[-len(y):]
-    return X, y
+
+    # Default is to return X and y as arrays, not as a dataframe.
+    if not return_df:
+        return X, y
+    else:
+        return pd.DataFrame({'Date': X, y_col: y})
 
 def linreg_jobpostings(df, y_col='Job Postings', normaliser=None, smooth='exp', log=True, degree=2):
-    X, y = preprocess_trend_x_and_y(df, log, normaliser, smooth, y_col)
+    X, y = smooth_and_normalise_timeseries(df, log, normaliser, smooth, y_col)
     X = PolynomialFeatures(degree=degree, include_bias=False).fit_transform(X)
     result_model = LinearRegression()
     result_model.fit(X, y) # Weighting the first point makes no conceptual sense because the 1st point isn't special.
@@ -129,6 +150,8 @@ def linreg_jobpostings(df, y_col='Job Postings', normaliser=None, smooth='exp', 
 def extract_timeseries_features(df, y_col='Job Postings', extraction_method='linreg',
                                 normaliser=None, smooth='exp', params=None):
     """
+    Extracts features for one skill's time series and returns them as a vector.
+
     :param df: The groupby dataframe that has the time series for one skill.
     :param y_col: The output column (the input is 'Date' by default)
     :param extraction_method: The type of feature extraction. Supported modes are 'linreg' and 'full'.
@@ -142,14 +165,13 @@ def extract_timeseries_features(df, y_col='Job Postings', extraction_method='lin
                 'degree': The degree of the polynomial fitted.
 
             Method-specific parameters should already be provided in the dict given to the wrapper function.
-    :return:
+    :return: Returns a feature vector generated for that skill.
     """
     if extraction_method == 'linreg':
         return linreg_jobpostings(df, y_col=y_col, normaliser=normaliser, smooth=smooth,
                                   log=params['log'], degree=params['degree'])
     elif extraction_method == 'full':
         pass
-
 
 
 def get_trend_slope_intercept(group_col_and_trends, feature_names):
@@ -159,60 +181,85 @@ def get_trend_slope_intercept(group_col_and_trends, feature_names):
                                                                                    pd.isna(x) else np.nan)
     return group_col_and_trends
 
+def compute_hybrid_score(df, col, weights):
+    return df[col].apply(lambda x: np.dot(x, weights))
 
-def skill_trend_features_wrapper(df, starting_date, end_date, total_log, min_freq=1, grouping=1, feature_type='linreg',
+
+def get_skill_pop_time_series(df, pop_type, params=None):
+    assert pop_type in ['log', 'bin', 'raw']
+    if params is not None:
+        params['type'] = pop_type
+    # Using logpop, binpop, or rawpop.
+    if pop_type == 'log':
+        # log popularity: The per-date company-level value for each skill is log(1+nAds_skill_t)
+        df['Job Postings'] = df['Job Postings Raw'].apply(lambda x: np.log(1 + x))
+        if params is not None:
+            params['log'] = True
+    elif pop_type == 'bin':
+        # bin popularity: The per-date company-level value for each skill is 1
+        df['Job Postings'] = 1
+        if params is not None:
+            params['log'] = False
+    elif pop_type == 'raw':
+        # raw popularity: The per-date company-level value for each skill is te raw value, nAds_skill_t
+        df['Job Postings'] = df['Job Postings Raw']
+        if params is not None:
+            params['log'] = False
+    df = df.groupby(['Date', 'Skill']).sum().reset_index()
+    return df
+
+
+def skill_trend_features_wrapper(df, starting_date, end_date, total_values, min_freq=1, feature_type='linreg',
                                  nafill='zero', pop_type='log', smoothing='movingavg', params=None, weights=None):
     """
-    Computes the dataframe containing the log sum trends (slope, intercept, acceleration, etc.) based on
-    a skills dataframe. The starting dataframe needs to have the columns 'Date', 'Skill', and
-    'Job Postings Raw', and needs to be company-level. The log of the company-level values is taken,
-    and then they are summed up, grouped by skill and date.
+
+    :param df: The dataframe. It dataframe needs to have the columns 'Date', 'Skill', and
+            'Job Postings Raw', and needs to be company-level.
+    :param starting_date: The starting date for the period for which features are going to be computed.
+    :param end_date: The end date for the period.
+    :param total_values: The total values that will be used for normalisation. If pop_type is 'log', this has to be
+            a sum of logs, and if it's 'bin', it has to be a sum of binarised values.
+    :param min_freq: Minimum frequency for skills. Skills below it are deleted. Default 1.
+    :param grouping: How many time steps to group together. Default 1.
+    :param feature_type: The type of feature extraction used. Options are 'linreg' and 'full'.
+    :param nafill: How to fill null values. Use 'zero'.
+    :param pop_type: Type of popularity to use. 'log', 'bin', or 'raw'.
+    :param smoothing: Type of smoothing used. None, 'exp', or 'movingavg'.
+    :param params: The parameters for the feature extraction method used.
+    :param weights: The weights used for the features in order to compute the HybridScore. The score is equal to the
+            dot product of the weights vector and the feature vector.
+    :return: A dataframe where every skill has its extracted features and potentially the HybridScore.
     """
-    assert pop_type in ['log', 'bin', 'raw']
 
     if params is None:
         params = dict()
-
-    params['type'] = pop_type
 
     print('Start: ' + str(starting_date))
     print('End: ' + str(end_date))
     df = get_period_of_time(df, starting_date, end_date).copy()
     skills_raw_sums = df[['Skill', 'Job Postings Raw']].groupby('Skill').sum()
 
-    # Using logpop, binpop, or rawpop.
-    if pop_type == 'log':
-        # log popularity: The per-date company-level value for each skill is log(1+nAds_skill_t)
-        df['Job Postings'] = df['Job Postings Raw'].apply(lambda x: np.log(1+x))
-        params['log'] = True
-    elif pop_type == 'bin':
-        # bin popularity: The per-date company-level value for each skill is 1
-        df['Job Postings'] = 1
-        params['log'] = False
-    elif pop_type == 'raw':
-        # raw popularity: The per-date company-level value for each skill is te raw value, nAds_skill_t
-        df['Job Postings'] = df['Job Postings Raw']
-        params['log'] = False
-
-    df = df.groupby(['Date', 'Skill']).sum().reset_index()
+    df = get_skill_pop_time_series(df, params, pop_type)
 
     df_with_trends_pooled = pd.DataFrame(
         fill_in_the_blank_dates(
-            group_time_steps_together(
-                delete_low_freq_skills(df, min_freq),
-                            steps_to_group=grouping, has_company=False), method=nafill, has_company=False).
+                delete_low_freq_skills(df, min_freq), method=nafill, has_company=False).
                                  groupby('Skill').apply(lambda x:
                                     extract_timeseries_features(x, extraction_method=feature_type, normaliser=
-                                           get_period_of_time(total_log, starting_date,
-                                              end_date), smooth=smoothing, params=params)))
+                                           get_period_of_time(total_values, starting_date,
+                                                              end_date), smooth=smoothing, params=params)))
 
     df_with_trends_pooled = df_with_trends_pooled.rename(columns={0: 'Features'})
     if feature_type == 'linreg':
         df_with_trends_pooled = get_trend_slope_intercept(df_with_trends_pooled, feature_names=LINREG_FEATURES)
+
+
     if weights is not None:
-        df_with_trends_pooled['HybridScore'] = df_with_trends_pooled['Features'].apply(lambda x: np.dot(x, weights))
+        df_with_trends_pooled['HybridScore'] = compute_hybrid_score(df_with_trends_pooled, 'Features', weights)
+
     print(df_with_trends_pooled.describe())
     return df_with_trends_pooled.join(skills_raw_sums)
+
 
 def compute_total_log_mean(df):
     """
@@ -226,12 +273,14 @@ def compute_total_values(df):
     return df[['Date', 'Company', 'Total']].drop_duplicates().groupby('Date').\
                                                                 sum().reset_index()
 
-def threshold_logsum_trends_simple(df_with_trends, col='Slope', pop_col='Job Postings Raw',
+def threshold_logsum_trends_simple(df_with_trends, col='HybridScore', pop_col='Job Postings Raw',
                                    col_percentile_thresh=.7, col_std_thresh=0,
                                    only_positives = False,
                                    pop_lower_percentile=0.5, pop_upper_percentile=0.9,
                                    pop_lower=0.001, pop_upper=0.01, total=None):
     """
+    Takes the scored skills, thresholds them based on their score and popularity, and returns the "emerging" skills.
+
     :param df_with_trends: Dataframe that has one row per skill, with that skill's score and popularity
             during the time period in question.
     :param col: The name of the score column.
