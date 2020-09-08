@@ -76,7 +76,8 @@ def group_time_steps_together(df, steps_to_group=3, has_company=True):
     result_df = pd.merge(result_df, min_dates, on='group').drop(columns=['group'])
     return result_df
 
-def smooth_and_normalise_timeseries(df, log, normaliser, smooth, y_col, date_to_step=True, return_df=False):
+def smooth_and_normalise_timeseries(df, log, normaliser=None, smooth=None, y_col='Job Postings',
+                                    date_to_step=True, return_df=False):
     """
     Performs smoothing and normalisation on the output values and converts the dates into input values.
     :param df:
@@ -185,14 +186,16 @@ def compute_hybrid_score(df, col, weights):
     return df[col].apply(lambda x: np.dot(x, weights))
 
 
-def get_skill_pop_time_series(df, pop_type, params=None):
+def get_skill_pop_time_series(df, pop_type, params=None, y_col='Job Postings Raw'):
+    # The df is company-level
+
     assert pop_type in ['log', 'bin', 'raw']
     if params is not None:
         params['type'] = pop_type
     # Using logpop, binpop, or rawpop.
     if pop_type == 'log':
         # log popularity: The per-date company-level value for each skill is log(1+nAds_skill_t)
-        df['Job Postings'] = df['Job Postings Raw'].apply(lambda x: np.log(1 + x))
+        df['Job Postings'] = df[y_col].apply(lambda x: np.log(1 + x))
         if params is not None:
             params['log'] = True
     elif pop_type == 'bin':
@@ -202,7 +205,7 @@ def get_skill_pop_time_series(df, pop_type, params=None):
             params['log'] = False
     elif pop_type == 'raw':
         # raw popularity: The per-date company-level value for each skill is te raw value, nAds_skill_t
-        df['Job Postings'] = df['Job Postings Raw']
+        df['Job Postings'] = df[y_col]
         if params is not None:
             params['log'] = False
     df = df.groupby(['Date', 'Skill']).sum().reset_index()
@@ -261,13 +264,36 @@ def skill_trend_features_wrapper(df, starting_date, end_date, total_values, min_
     return df_with_trends_pooled.join(skills_raw_sums)
 
 
+def investigate_skill_pop_profile(df, skill, pop_type, time_period=None, normaliser=None, smooth=None):
+    """
+    Provides the normalised and smoothed popularity time series of *one* skill so that it can be plotted.
+    :param df: The dataframe containing all skills' time series at the company level
+    :param skill: The desired skill
+    :param pop_type: The type of popularity to use, log, bin, or raw
+    :param time_period: A tuple containing the beginning and end of the desired period of time. Default None.
+    :param normaliser: Normalising dataframe. Default None (no normalisation). Dates need to be aligned with df.
+    :param smooth: Type of smoothing used. Default None, other options 'exp' and 'movingavg'.
+    :return: Dataframe with two columns: Date and Job Postings, containing the normalised and smoothed time series
+            for the skill in question.
+    """
+    params = dict()
+    if time_period is not None:
+        df = get_period_of_time(df, time_period[0], time_period[1])
+        if normaliser is not None:
+            normaliser = get_period_of_time(normaliser, time_period[0], time_period[1])
+
+    df = get_skill_pop_time_series(df.loc[df.Skill == skill].copy(), pop_type, params)
+    return smooth_and_normalise_timeseries(df, params['log'], normaliser, smooth,
+                                           date_to_step=False, return_df=True)
+
+
 def compute_total_log_mean(df):
     """
     For each date, computes the average, among all companies, of the log of their total number of ads.
     """
     return df[['Date', 'Company', 'Total']].drop_duplicates().drop(columns=['Company'])\
-                    .groupby('Date').apply(lambda x: np.mean(x['Total'].apply(np.log))).reset_index().rename(
-                                                            columns={0: 'Total'})
+                    .groupby('Date').apply(lambda x: np.mean(x['Total'].apply(lambda y: 1+np.log(y)))).\
+                                                            reset_index().rename(columns={0: 'Total'})
 
 def compute_total_values(df):
     return df[['Date', 'Company', 'Total']].drop_duplicates().groupby('Date').\
