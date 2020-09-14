@@ -21,7 +21,7 @@ def get_free_text_results(df, col_type='Skills'):
     return result.explode(col_type + ', free text')
 
 
-def get_responses_in_rows(initial_dfs, col_type='Skills'):
+def get_responses_in_rows(initial_dfs, col_type='Skills', filter_nonsense=True):
     """
     Turns the dataframe from the original Qualtrics format into the final desired format, where each row is identified
     by *one* skill/firm and where the columns contain *one person's* responses for that skill/firm. Also returns the
@@ -60,6 +60,13 @@ def get_responses_in_rows(initial_dfs, col_type='Skills'):
     df_final = reduce(lambda left, right: pd.merge(left, right, how='outer', left_index=True, right_index=True),
                   questions_separate).reset_index().drop(columns=['level_0']).rename(columns={'level_1': col_type})
 
+    if filter_nonsense:
+        # Filters out the responses where the main answer is NaN
+        df_final = df_final.loc[~df_final['Main'].isnull()]
+        # Corrects responses where, for example, the respondent didn't say No, but still chose an option in the NoCol
+        df_final['YesCol'] = df_final.apply(lambda x: x['YesCol'] if x['Main'] == YES else np.nan)
+        df_final['NoCol'] = df_final.apply(lambda x: x['NoCol'] if x['Main'] == NO else np.nan)
+
     free_text_results = get_free_text_results(dfs, col_type)
 
     return df_final, free_text_results
@@ -72,7 +79,7 @@ def does_overlap(time_period_pair):
 def in_depth_answer_to_ground_truth(df, col_type, time_periods=TIME_PERIODS):
     df['majority'] = df.apply(lambda x: 1 if Counter(x['Main'])[YES] >=
                                              Counter(x['Main'])[NO] + Counter(x['YesCol'])[BEFORE17] else 0, axis=1)
-    modified_yescol_list = df['YesCol'].apply(lambda x: [y for y in x if y != BEFORE17 and not pd.isna(y)]).apply(
+    modified_yescol_list = df['YesCol'].apply(lambda x: [y for y in remove_list_nans(x) if y != BEFORE17]).apply(
                         lambda x: [y.split(' ')[1]+'-2020' for y in x]
     )
     df['modified_yescol'] = modified_yescol_list
@@ -119,5 +126,18 @@ def find_majority_response_ground_truth(df, time_periods=TIME_PERIODS, col_type=
     return majorities, ground_truth_for_periods
 
 def assemble_question_responses(initial_dfs, has_firms=True):
-    pass
-    #main_q =
+    skills = get_responses_in_rows(initial_dfs, col_type='Skills')
+    if has_firms:
+        firms = get_responses_in_rows(initial_dfs, col_type='Firms')
+    else:
+        firms = None
+    return skills, firms
+
+def get_response_proportions(df, col_type='Skills', col_to_analyse='Main'):
+    df = df[[col_type, col_to_analyse]].groupby(col_type).agg(list).reset_index()
+    df[col_to_analyse] = df[col_to_analyse].apply(remove_list_nans)
+    df[col_to_analyse+'_response_count'] = df[col_to_analyse].apply(len)
+    df[col_to_analyse] = df[col_to_analyse].apply(lambda x: Counter(x))
+    df[col_to_analyse+'_proportions'] = df.apply(lambda x: [(i, y/x[col_to_analyse+'_response_count']) for i, y in
+                                                            x[col_to_analyse].items()], axis=1)
+    return df
