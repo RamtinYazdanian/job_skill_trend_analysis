@@ -13,6 +13,10 @@ def get_period_of_time(df, start, end):
         return df
 
 
+def remove_list_nans(l):
+    return [x for x in l if not pd.isna(x)]
+
+
 def explode(df, lst_cols, fill_value='', preserve_index=False):
     # make sure `lst_cols` is list-alike
     if (lst_cols is not None
