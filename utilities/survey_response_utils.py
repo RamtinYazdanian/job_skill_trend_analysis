@@ -64,33 +64,59 @@ def get_responses_in_rows(initial_dfs, col_type='Skills'):
 
     return df_final, free_text_results
 
-def in_depth_answer_to_ground_truth(df, time_periods=TIME_PERIODS):
+def does_overlap(time_period_pair):
+    starts = [int(x.split('-')[0]) for x in time_period_pair]
+    ends = [int(x.split('-')[1]) for x in time_period_pair]
+    return starts[0] < ends[1] and starts[1] < ends[0]
+
+def in_depth_answer_to_ground_truth(df, col_type, time_periods=TIME_PERIODS):
     df['majority'] = df.apply(lambda x: 1 if Counter(x['Main'])[YES] >=
                                              Counter(x['Main'])[NO] + Counter(x['YesCol'])[BEFORE17] else 0, axis=1)
+    modified_yescol_list = df['YesCol'].apply(lambda x: [y for y in x if y != BEFORE17 and not pd.isna(y)]).apply(
+                        lambda x: [y.split(' ')[1]+'-2020' for y in x]
+    )
+    df['modified_yescol'] = modified_yescol_list
+
+    result_dict = dict()
     for time_period_key in time_periods:
-        pass
         # First remove the "Earlier than 2017"s, then for each skill and each time period, compute the number of
         # YesCol responses that include that time period (inclusion criterion: the two periods have to overlap, which,
         # for practical purposes, means that the number in the response - e.g. "Since 2018" - should be strictly
         # smaller than the end year of the time period but also greater than or equal to the starting year of the
         # time period). If this number is equal to, or more than the number of total YesCol responses
         # given for that skill divided by 2 (excluding the "Earlier than 2017" responses), then it's a
-        # "1" for the ground truth column for that time period, which essentially means that we treat the
+        # True for the ground truth column for that time period, which essentially means that we treat the
         # overlapping period responses as positives and non-overlapping period responses as negatives.
         # Each time period will have one ground truth column
-        # in which each skill has either 0 or 1, and at the end, we create a dictionary where each time period is
-        # mapped to a list of the skills that had a 1 in that period's column.
+        # in which each skill has either False or True, and at the end, we create a dictionary where each time period is
+        # mapped to a list of the skills that had a True in that period's column.
 
-        #modified_yescol_list = df['YesCol'].apply(lambda x: [1 if y. for y in x])
+        new_period_col = df.apply(lambda x: (len([y for y in x['modified_yescol'] if does_overlap([time_period_key, y])]),
+                                             len(x['modified_yescol'])) if x['majority'] == 1 else (-1,-1), axis=1)
+        new_period_col = new_period_col.apply(lambda x: x[0] >= x[1]/2 if x[1] > 0 else False)
+        df[time_period_key] = new_period_col
+        result_dict[time_period_key] = df.loc[df[time_period_key] == True, col_type].values.tolist()
 
-def find_majority_response(df, col_type='Skills', remove_unsure=True):
+    return df, result_dict
+
+def find_majority_response_ground_truth(df, time_periods=TIME_PERIODS, col_type='Skills'):
+    """
+    Computes the majority response for each skill/firm, removing Unsure responses and treating "Before 2017" as a No.
+    Then, creates a ground truth dictionary wherein each time period is mapped to the skills/firms that qualified as
+    emerging/trend-anticipating in that time period, based on their majority (Yes) and YesCol (time period overlap for
+    more than half) responses.
+    :param df: The starting df, which is the output of get_responses_in_rows
+    :param time_periods: A dictionary where the keys are the string representations of time periods, like '2018-2020'.
+    :param col_type: Skills or Firms
+    :return: The majority dataframe with time period columns, plus a ground truth dictionary mapping each time period
+    key to the list of skills/firms that qualified for ground truth in that period.
+    """
     assert col_type in ['Skills', 'Firms']
-    if remove_unsure:
-        df = df.loc[df['Main'] != UNSURE]
-    majorities = df.groupby(col_type).agg(lambda x: list(x))
+    df = df.loc[df['Main'] != UNSURE]
+    majorities = df.groupby(col_type).agg(lambda x: list(x)).reset_index()
+    majorities, ground_truth_for_periods = in_depth_answer_to_ground_truth(majorities, col_type, time_periods)
 
-
-    pass
+    return majorities, ground_truth_for_periods
 
 def assemble_question_responses(initial_dfs, has_firms=True):
     pass
