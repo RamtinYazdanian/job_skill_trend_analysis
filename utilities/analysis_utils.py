@@ -230,7 +230,9 @@ def skill_trend_features_wrapper(df, starting_date, end_date, total_values, min_
     :param smoothing: Type of smoothing used. None, 'exp', or 'movingavg'.
     :param params: The parameters for the feature extraction method used.
     :param weights: The weights used for the features in order to compute the HybridScore. The score is equal to the
-            dot product of the weights vector and the feature vector.
+            dot product of the weights vector and the feature vector. Provide None if you only want the features (e.g.
+            when performing a grid search to find the right weights, meaning that you'd have to call
+            compute_hybrid_score separately several times).
     :return: A dataframe where every skill has its extracted features and potentially the HybridScore.
     """
 
