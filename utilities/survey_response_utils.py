@@ -3,6 +3,7 @@ from utilities.pandas_utils import *
 from utilities.constants import *
 from functools import reduce
 from collections import Counter
+import krippendorff
 
 
 def get_skill_or_firm_name(s):
@@ -51,7 +52,7 @@ def get_responses_in_rows(initial_dfs, col_type='Skills', filter_nonsense=True):
     ]
 
     questions_separate = [dfs[current_names] for current_names in question_type_cols]
-    questions_separate = [questions_separate[i].rename(columns=old_to_new_names[i]).iloc[2:].stack()
+    questions_separate = [questions_separate[i].rename(columns=old_to_new_names[i]).iloc[2:]
                           for i in range(len(questions_separate))]
 
     questions_separate = [pd.DataFrame(questions_separate[i].stack()).rename(columns={0: QUESTION_NAMES[i]})
@@ -141,3 +142,24 @@ def get_response_proportions(df, col_type='Skills', col_to_analyse='Main'):
     df[col_to_analyse+'_proportions'] = df.apply(lambda x: [(i, y/x[col_to_analyse+'_response_count']) for i, y in
                                                             x[col_to_analyse].items()], axis=1)
     return df
+
+def get_value_counts_for_agreement(df, col_to_analyse, remove_unsure=False):
+    """
+    :param df: Dataframe from get_response_proportions
+    :param col_to_analyse: Name of the column to use, default 'Main'.
+    :param remove_unsure: Whether or not to remove Unsure from the responses
+    :return: Returns a (n_skills * 2 or 3) array that counts each type of response (Yes, No, optionally Unsure).
+    """
+    df[YES] = df[col_to_analyse].apply(lambda x: x[YES])
+    df[NO] = df[col_to_analyse].apply(lambda x: x[NO])
+    cols_to_keep = [YES, NO]
+    if not remove_unsure:
+        df[UNSURE] = df[col_to_analyse].apply(lambda x: x[UNSURE])
+        cols_to_keep.extend([UNSURE])
+    df = df[cols_to_keep]
+    return df.values
+
+def get_interrater_agreement(df, col_type='Skill', remove_unsure=False):
+    df = get_response_proportions(df, col_type, 'Main')
+    value_counts = get_value_counts_for_agreement(df, 'Main', remove_unsure)
+    return krippendorff.alpha(value_counts=value_counts, level_of_measurement='nominal')
