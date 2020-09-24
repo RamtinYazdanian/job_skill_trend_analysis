@@ -231,8 +231,7 @@ def skill_trend_features_wrapper(df, starting_date, end_date, total_values, min_
     :param params: The parameters for the feature extraction method used.
     :param weights: The weights used for the features in order to compute the HybridScore. The score is equal to the
             dot product of the weights vector and the feature vector. Provide None if you only want the features (e.g.
-            when performing a grid search to find the right weights, meaning that you'd have to call
-            compute_hybrid_score separately several times).
+            when optimising the weights).
     :return: A dataframe where every skill has its extracted features and potentially the HybridScore.
     """
 
@@ -264,6 +263,34 @@ def skill_trend_features_wrapper(df, starting_date, end_date, total_values, min_
 
     print(df_with_trends_pooled.describe())
     return df_with_trends_pooled.join(skills_raw_sums)
+
+def compile_all_feature_dfs(df, time_periods, total_values, min_freq=1, feature_type='linreg',
+                                 nafill='zero', pop_type='log', smoothing='movingavg', params=None, weights=None):
+    """
+    Creates a dictionary mapping each period's name (keys of time_periods) to the feature dataframe for that period.
+    For details on the arguments, look at skill_trend_features_wrapper.
+
+    This is the method that provides data for our classification task.
+    """
+    results = dict()
+    for time_period_key in time_periods:
+        time_period = time_periods[time_period_key]
+        results[time_period_key] = skill_trend_features_wrapper(df, time_period[0], time_period[1],
+                                 total_values[time_period], min_freq=min_freq, feature_type=feature_type,
+                                 nafill=nafill, pop_type=pop_type, smoothing=smoothing, params=params, weights=weights)
+    return results
+
+
+def compute_time_period_rawpop_quantile_thresholds(period_to_df, q, pop_col='Job Postings Raw'):
+    """
+    Returns a dictionary that maps each time period key to its rawpop upper bound based on the distribution and desired
+    quantile (q).
+    :param period_to_df: Output of compile_all_feature_dfs
+    :param q: The desired upper bound quantile.
+    :param pop_col: The name of the rawpop column. Do not change.
+    :return: A dictionary mapping the time periods to the upper bounds.
+    """
+    return {period: period_to_df[period][pop_col].quantile(q) for period in period_to_df}
 
 
 def investigate_skill_pop_profile(df, skill, pop_type, time_period=None, normaliser=None, smooth=None):

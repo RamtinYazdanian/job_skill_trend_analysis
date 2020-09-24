@@ -20,3 +20,6 @@ TIME_PERIODS = {
     '2017-2019': (np.datetime64('2017-01-01'), np.datetime64('2019-01-01')),
     '2017-2020': (np.datetime64('2017-01-01'), np.datetime64('2020-01-01'))
 }
+
+
+CV_FOLDS=5

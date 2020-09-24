@@ -79,7 +79,8 @@ def does_overlap(time_period_pair):
 
 def in_depth_answer_to_ground_truth(df, col_type, time_periods=TIME_PERIODS):
     df['majority'] = df.apply(lambda x: 1 if Counter(x['Main'])[YES] >=
-                                             Counter(x['Main'])[NO] + Counter(x['YesCol'])[BEFORE17] else 0, axis=1)
+                                             Counter(x['Main'])[NO] + Counter(x['YesCol'])[BEFORE17]
+                                             and Counter(x['Main'])[YES] > 0 else 0, axis=1)
     modified_yescol_list = df['YesCol'].apply(lambda x: [y for y in remove_list_nans(x) if y != BEFORE17]).apply(
                         lambda x: [y.split(' ')[1]+'-2020' for y in x]
     )
@@ -107,9 +108,10 @@ def in_depth_answer_to_ground_truth(df, col_type, time_periods=TIME_PERIODS):
 
     return df, result_dict
 
-def find_majority_response_ground_truth(df, time_periods=TIME_PERIODS, col_type='Skills'):
+def find_majority_response_ground_truth(df, time_periods=TIME_PERIODS, col_type='Skills', remove_unsure=False):
     """
-    Computes the majority response for each skill/firm, removing Unsure responses and treating "Before 2017" as a No.
+    Computes the majority response for each skill/firm, optionally removing Unsure responses and treating
+    "Before 2017" as a No. If Unsures are not removed, Full-Unsure skills are considered to be "No"s.
     Then, creates a ground truth dictionary wherein each time period is mapped to the skills/firms that qualified as
     emerging/trend-anticipating in that time period, based on their majority (Yes) and YesCol (time period overlap for
     more than half) responses.
@@ -120,7 +122,8 @@ def find_majority_response_ground_truth(df, time_periods=TIME_PERIODS, col_type=
     key to the list of skills/firms that qualified for ground truth in that period.
     """
     assert col_type in ['Skills', 'Firms']
-    df = df.loc[df['Main'] != UNSURE]
+    if remove_unsure:
+        df = df.loc[df['Main'] != UNSURE]
     majorities = df.groupby(col_type).agg(lambda x: list(x)).reset_index()
     majorities, ground_truth_for_periods = in_depth_answer_to_ground_truth(majorities, col_type, time_periods)
 
