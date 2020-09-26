@@ -12,6 +12,10 @@ YES = 'Yes'
 NO = 'No'
 BEFORE17 = 'Earlier than 2017'
 
+POP_COL='Job Postings Raw'
+TRUTH_COL='row_class'
+FEATURE_COL='Features'
+
 TIME_PERIODS = {
     '2017-2018': (np.datetime64('2017-01-01'), np.datetime64('2018-01-01')),
     '2018-2019': (np.datetime64('2018-01-01'), np.datetime64('2019-01-01')),
@@ -23,3 +27,4 @@ TIME_PERIODS = {
 
 
 CV_FOLDS=5
+C_LIST = np.logspace(start=-5, stop=4, num=10, base=10)

@@ -49,5 +49,9 @@ def explode(df, lst_cols, fill_value='', preserve_index=False):
     return res
 
 
-def filter_out_by_common_index(df_ref, df_target, index_col='common_index'):
-    return df_target.loc[df_target[index_col].apply(lambda x: x in df_ref[index_col].values)]
+def filter_out_by_common_index(df_ref, df_target, index_col='common_index', return_both=False):
+    if return_both:
+        return df_target.loc[df_target[index_col].apply(lambda x: x in df_ref[index_col].values)], \
+               df_target.loc[df_target[index_col].apply(lambda x: x not in df_ref[index_col].values)]
+    else:
+        return df_target.loc[df_target[index_col].apply(lambda x: x in df_ref[index_col].values)]
