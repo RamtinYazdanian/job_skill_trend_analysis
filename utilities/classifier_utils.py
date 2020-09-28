@@ -320,5 +320,12 @@ def cross_validate_model(cv_data, rawpop_upper_bounds, normaliser=None):
     return best_model, best_c, best_score
 
 
-def interpret_model(clf_model, feature_names):
-    pass
+def interpret_model(clf_model, feature_names, n_features=None):
+    interpretation_df = pd.DataFrame({'Name': ['s_min']+feature_names,
+                                      'Score': [-clf_model.intercept_] + clf_model.coef_.tolist()})
+    interpretation_df = interpretation_df.sort_values('Score', ascending=False)
+    if n_features is None:
+        return interpretation_df
+    else:
+        return pd.concat([interpretation_df.loc[interpretation_df.Name == 's_min'], interpretation_df.head(n_features),
+                  interpretation_df.tail(n_features)], axis=0).drop_duplicates().sort_values('Score', ascending=False)
