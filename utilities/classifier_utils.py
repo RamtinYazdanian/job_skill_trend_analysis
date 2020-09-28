@@ -218,6 +218,15 @@ def evaluate_results(y_pred, y_truth, type='f1'):
 
 
 def predict_and_evaluate_dfs(clf_model, x_datapoints, y_datapoints, rawpop_upper_bounds=None, normaliser=None):
+    """
+    Wrapper for predicting and evaluating the predictions.
+    :param clf_model: Classifier model
+    :param x_datapoints: X dataframe
+    :param y_datapoints: Y dataframe
+    :param rawpop_upper_bounds: Rawpop upper bound dictionary
+    :param normaliser: Normaliser object
+    :return: Predicted y and evaluation metric result
+    """
     y_pred = predict_results_df(clf_model, x_datapoints, y_datapoints.common_index.values, rawpop_upper_bounds, normaliser)
     evaluation = evaluate_results(y_pred, y_datapoints[TRUTH_COL].values, 'f1')
     return y_pred, evaluation
@@ -268,7 +277,7 @@ def train_logreg_model(x_df, y_df, c, rawpop_upper_bounds, normaliser=None):
     :param c: The regularisation hyperparameter
     :param rawpop_upper_bounds: The upper bounds dictionary
     :param normaliser: The normaliser, can be None.
-    :return:
+    :return: The trained model
     """
     modified_x_df, modified_y_df = filter_out_negatives(x_df, rawpop_upper_bounds,
                                                         y_df,
