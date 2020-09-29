@@ -13,3 +13,6 @@ BEFORE17 = 'Earlier than 2017'
 
 POP_COL='Job Postings Raw'
 TRUTH_COL='row_class'
+
+X_REFCOL = 'Skill'
+Y_REFCOL = 'Skills'
