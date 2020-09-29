@@ -1,9 +1,10 @@
-from utilities.common_utils import *
 from utilities.pandas_utils import *
 from utilities.constants import *
 from functools import reduce
 from collections import Counter
 import krippendorff
+
+from utilities.params import TIME_PERIODS
 
 
 def get_skill_or_firm_name(s):
