@@ -8,7 +8,7 @@ from sklearn.model_selection import StratifiedKFold, KFold
 from utilities.params import FEATURE_COL, TIME_PERIODS, CV_FOLDS, C_LIST, QUANTILES
 
 
-def skills_to_indices(dfs_x, dfs_y, x_refcol='Skill', y_refcol='Skills'):
+def skills_to_indices(dfs_x, dfs_y, x_refcol=X_REFCOL, y_refcol=Y_REFCOL):
     """
     :param dfs_x: Dictionary mapping each time period's key to the features dataframe for the skills in that period.
     This is the output of analysis_utils.compile_all_feature_dfs
@@ -57,7 +57,7 @@ def skills_to_indices(dfs_x, dfs_y, x_refcol='Skill', y_refcol='Skills'):
     return df_x_datapoints_with_ground_truth, df_y_all, df_x_all, datapoints_all_indices
 
 
-def reformat_y(df_y_ground_truths, time_periods=TIME_PERIODS, ref_col = 'Skills'):
+def reformat_y(df_y_ground_truths, time_periods=TIME_PERIODS, ref_col = Y_REFCOL):
     """
     Prepares ground truth data for reindexing, which is itself a preprocessing step for our classification task.
 
@@ -224,7 +224,8 @@ def evaluate_results(y_pred, y_truth, type='f1'):
         return conf_mat[1,1], conf_mat[0,1], conf_mat[1,0]
 
 
-def predict_and_evaluate_dfs(clf_model, x_datapoints, y_datapoints, rawpop_upper_bounds=None, normaliser=None):
+def predict_and_evaluate_dfs(clf_model, x_datapoints, y_datapoints,
+                             rawpop_upper_bounds=None, normaliser=None, eval_type='f1'):
     """
     Wrapper for predicting and evaluating the predictions.
     :param clf_model: Classifier model
@@ -235,7 +236,7 @@ def predict_and_evaluate_dfs(clf_model, x_datapoints, y_datapoints, rawpop_upper
     :return: Predicted y and evaluation metric result
     """
     y_pred = predict_results_df(clf_model, x_datapoints, y_datapoints.common_index.values, rawpop_upper_bounds, normaliser)
-    evaluation = evaluate_results(y_pred, y_datapoints[TRUTH_COL].values, 'f1')
+    evaluation = evaluate_results(y_pred, y_datapoints[TRUTH_COL].values, eval_type)
     return y_pred, evaluation
 
 def predict_and_evaluate_for_validation(clf_model, x_mat, y_vec,
@@ -371,3 +372,13 @@ def interpret_model(clf_model, feature_names, n_features=None):
     else:
         return pd.concat([interpretation_df.loc[interpretation_df.Name == 's_min'], interpretation_df.head(n_features),
                   interpretation_df.tail(n_features)], axis=0).drop_duplicates().sort_values('Score', ascending=False)
+
+def get_error_rate_for_each_period(clf_model, x_datapoints, y_datapoints, time_periods,
+                                   rawpop_upper_bounds=None, normaliser=None, eval_type='f1'):
+    results = dict()
+    for period in time_periods:
+        results[period] = predict_and_evaluate_dfs(clf_model,
+                                   x_datapoints.loc[x_datapoints[X_REFCOL].apply(lambda sp: period in sp)],
+                                   y_datapoints.loc[y_datapoints[Y_REFCOL].apply(lambda sp: period in sp)],
+                                   rawpop_upper_bounds, normaliser, eval_type)[1]
+    return results
