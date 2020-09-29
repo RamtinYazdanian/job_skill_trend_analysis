@@ -4,6 +4,7 @@ from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PolynomialFeatures
 from utilities.pandas_utils import get_period_of_time
 from utilities.constants import *
+from utilities.params import *
 
 def divide_into_periods(df, cols, start_date=None, end_date=None, result_col_name='Count'):
     df = get_period_of_time(df, start_date, end_date).copy()
@@ -148,31 +149,40 @@ def linreg_jobpostings(df, y_col='Job Postings', normaliser=None, smooth='exp', 
                              spike_value, result_model.intercept_[0]])
 
 
-def extract_timeseries_features(df, y_col='Job Postings', extraction_method='linreg',
+def extract_timeseries_features(df, y_col='Job Postings', extraction_methods=FEATURES_TO_COMPUTE,
                                 normaliser=None, smooth='exp', params=None):
     """
-    Extracts features for one skill's time series and returns them as a vector.
+    Extracts (multiple types of) features for one skill's time series and returns them as a list of vectors.
 
     :param df: The groupby dataframe that has the time series for one skill.
     :param y_col: The output column (the input is 'Date' by default)
-    :param extraction_method: The type of feature extraction. Supported modes are 'linreg' and 'full'.
+    :param extraction_methods: A list with the types of feature extraction. Supported modes are 'linreg' and 'tsfresh'.
     :param normaliser: The dataframe used to normalise the output.
     :param smooth: Smoothing method (None, 'exp', or 'movingavg')
-    :param params: Parameters specific to the feature extraction method. These are as follows:
+    :param params: Parameters specific to the feature extraction methods (dict of dicts, first key is extraction method)
+            These are as follows:
             For all methods:
                 'log': Whether the normalisation is logarithmic (subtraction) or not (division)
                 'pop_type': Whether the type of popularity used (as the output variable) was log, bin, or raw
-            For lingreg:
+            For linreg:
                 'degree': The degree of the polynomial fitted.
 
             Method-specific parameters should already be provided in the dict given to the wrapper function.
-    :return: Returns a feature vector generated for that skill.
+    :return: Returns a list of feature vectors generated for that skill.
     """
-    if extraction_method == 'linreg':
-        return linreg_jobpostings(df, y_col=y_col, normaliser=normaliser, smooth=smooth,
-                                  log=params['log'], degree=params['degree'])
-    elif extraction_method == 'full':
-        pass
+    results = list()
+    for extraction_method in extraction_methods:
+        current_params = params[extraction_method]
+        if extraction_method == 'linreg':
+            results.append(linreg_jobpostings(df, y_col=y_col, normaliser=normaliser, smooth=smooth,
+                                      log=current_params['log'], degree=current_params['degree']))
+        elif extraction_method == 'tsfresh':
+            pass
+        else:
+            results.append(None)
+    return results
+
+
 
 
 def get_trend_slope_intercept(group_col_and_trends, feature_names):
@@ -186,33 +196,38 @@ def compute_hybrid_score(df, col, weights):
     return df[col].apply(lambda x: np.dot(x, weights))
 
 
+def pop_type_function(x, pop_type='log'):
+    # Using logpop, binpop, or rawpop.
+    assert pop_type in ['bin', 'log', 'raw']
+    if pop_type == 'log':
+        # log popularity: log(1+nAds_skill_t)
+        return np.log(1 + x)
+    elif pop_type == 'bin':
+        # bin popularity: 1
+        return 1
+    elif pop_type == 'raw':
+        # raw popularity: nAds_skill_t
+        return x
+
+
 def get_skill_pop_time_series(df, pop_type, params=None, y_col='Job Postings Raw'):
     # The df is company-level
-
     assert pop_type in ['log', 'bin', 'raw']
     if params is not None:
-        params['type'] = pop_type
+        for subparams in params.values():
+            subparams['type'] = pop_type
+            if pop_type == 'log':
+                subparams['log'] = True
+            else:
+                subparams['log'] = False
     # Using logpop, binpop, or rawpop.
-    if pop_type == 'log':
-        # log popularity: The per-date company-level value for each skill is log(1+nAds_skill_t)
-        df['Job Postings'] = df[y_col].apply(lambda x: np.log(1 + x))
-        if params is not None:
-            params['log'] = True
-    elif pop_type == 'bin':
-        # bin popularity: The per-date company-level value for each skill is 1
-        df['Job Postings'] = 1
-        if params is not None:
-            params['log'] = False
-    elif pop_type == 'raw':
-        # raw popularity: The per-date company-level value for each skill is te raw value, nAds_skill_t
-        df['Job Postings'] = df[y_col]
-        if params is not None:
-            params['log'] = False
+    df['Job Postings'] = df[y_col].apply(lambda x: pop_type_function(x, pop_type))
     df = df.groupby(['Date', 'Skill']).sum().reset_index()
     return df
 
 
-def skill_trend_features_wrapper(df, starting_date, end_date, total_values, min_freq=1, feature_type='linreg',
+def skill_trend_features_wrapper(df, starting_date, end_date, total_values, min_freq=1,
+                                 feature_types=FEATURES_TO_COMPUTE,
                                  nafill='zero', pop_type='log', smoothing='movingavg', params=None, weights=None):
     """
 
@@ -228,15 +243,15 @@ def skill_trend_features_wrapper(df, starting_date, end_date, total_values, min_
     :param nafill: How to fill null values. Use 'zero'.
     :param pop_type: Type of popularity to use. 'log', 'bin', or 'raw'.
     :param smoothing: Type of smoothing used. None, 'exp', or 'movingavg'.
-    :param params: The parameters for the feature extraction method used.
+    :param params: The parameters for each feature extraction method used. A dictionary of dictionaries.
     :param weights: The weights used for the features in order to compute the HybridScore. The score is equal to the
             dot product of the weights vector and the feature vector. Provide None if you only want the features (e.g.
             when optimising the weights).
-    :return: A dataframe where every skill has its extracted features and potentially the HybridScore.
+    :return: A dataframe where every skill has its extracted features and optionally the HybridScore.
     """
 
     if params is None:
-        params = dict()
+        params = {feature_type: dict() for feature_type in feature_types}
 
     print('Start: ' + str(starting_date))
     print('End: ' + str(end_date))
@@ -245,38 +260,42 @@ def skill_trend_features_wrapper(df, starting_date, end_date, total_values, min_
 
     df = get_skill_pop_time_series(df, params, pop_type)
 
+
     df_with_trends_pooled = pd.DataFrame(
         fill_in_the_blank_dates(
                 delete_low_freq_skills(df, min_freq), method=nafill, has_company=False).
                                  groupby('Skill').apply(lambda x:
-                                    extract_timeseries_features(x, extraction_method=feature_type, normaliser=
+                                    extract_timeseries_features(x, extraction_methods=feature_types, normaliser=
                                            get_period_of_time(total_values, starting_date,
                                                               end_date), smooth=smoothing, params=params)))
+    for i in range(len(feature_types)):
+        feature_type = feature_types[i]
+        df_with_trends_pooled[feature_type] = df_with_trends_pooled[0].apply(lambda x: x[i])
+    df_with_trends_pooled = df_with_trends_pooled.drop(columns=[0])
 
-    df_with_trends_pooled = df_with_trends_pooled.rename(columns={0: 'Features'})
-    if feature_type == 'linreg':
-        df_with_trends_pooled = get_trend_slope_intercept(df_with_trends_pooled, feature_names=LINREG_FEATURES)
-
-
-    if weights is not None:
-        df_with_trends_pooled['HybridScore'] = compute_hybrid_score(df_with_trends_pooled, 'Features', weights)
+    # if weights is not None:
+    #     df_with_trends_pooled['HybridScore'] = compute_hybrid_score(df_with_trends_pooled, 'tsfresh', weights)
 
     print(df_with_trends_pooled.describe())
     return df_with_trends_pooled.join(skills_raw_sums)
 
-def compile_all_feature_dfs(df, time_periods, total_values, min_freq=1, feature_type='linreg',
+def compile_all_feature_dfs(df, time_periods, total_values, min_freq=1, feature_types=FEATURES_TO_COMPUTE,
                                  nafill='zero', pop_type='log', smoothing='movingavg', params=None, weights=None):
     """
     Creates a dictionary mapping each period's name (keys of time_periods) to the feature dataframe for that period.
     For details on the arguments, look at skill_trend_features_wrapper.
 
     This is the method that provides data for our classification task.
+
+    :param df: The global ad dataframe with all the ads
+    :param time_periods: The dictionary mapping each period's name to a tuple of (start_date, end_date)
+    :param total_values: The global normaliser dataframe, which contains, for example
     """
     results = dict()
     for time_period_key in time_periods:
         time_period = time_periods[time_period_key]
         results[time_period_key] = skill_trend_features_wrapper(df, time_period[0], time_period[1],
-                                 total_values[time_period], min_freq=min_freq, feature_type=feature_type,
+                                 total_values[time_period], min_freq=min_freq, feature_types=feature_types,
                                  nafill=nafill, pop_type=pop_type, smoothing=smoothing, params=params, weights=weights)
     return results
 
@@ -316,12 +335,12 @@ def investigate_skill_pop_profile(df, skill, pop_type, time_period=None, normali
                                            date_to_step=False, return_df=True)
 
 
-def compute_total_log_mean(df):
+def compute_total_poptype_mean(df, pop_type='log'):
     """
-    For each date, computes the average, among all companies, of the log of their total number of ads.
+    For each date, computes the average, among all companies, of the desired poptype of their total number of ads.
     """
     return df[['Date', 'Company', 'Total']].drop_duplicates().drop(columns=['Company'])\
-                    .groupby('Date').apply(lambda x: np.mean(x['Total'].apply(lambda y: 1+np.log(y)))).\
+            .groupby('Date').apply(lambda x: np.mean(x['Total'].apply(lambda y: pop_type_function(y, pop_type)))).\
                                                             reset_index().rename(columns={0: 'Total'})
 
 def compute_total_values(df):
@@ -551,7 +570,7 @@ def company_emerging_skill_wrapper(skills_df, set_of_companies, start_and_end_da
     companies_skill_trends = [skill_trend_features_wrapper(companies_skills,
                                                            start_and_end_dates[i][0],
                                                            start_and_end_dates[i][1],
-                                                           compute_total_log_mean(
+                                                           compute_total_poptype_mean(
                                                                          companies_skills))
                               for i in range(len(start_and_end_dates))]
     for skill_trend_df in companies_skill_trends:
