@@ -2,9 +2,11 @@ from utilities.analysis_utils import *
 from utilities.common_utils import *
 from utilities.pandas_utils import *
 from sklearn.metrics import precision_recall_fscore_support, f1_score, confusion_matrix
-from sklearn.preprocessing import RobustScaler, StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedKFold, KFold
+
+from utilities.params import FEATURE_COL, TIME_PERIODS, CV_FOLDS, C_LIST, QUANTILES
+
 
 def skills_to_indices(dfs_x, dfs_y, x_refcol='Skill', y_refcol='Skills'):
     """
@@ -24,13 +26,16 @@ def skills_to_indices(dfs_x, dfs_y, x_refcol='Skill', y_refcol='Skills'):
     there *can* be skills present in df_y_all that are absent from df_x_datapoints_with_ground_truth; these are skills
     that did not show up in any of the ads for that year, and are predicted as negative by default.
 
-    RUN ONCE
+    RUN ONCE per pop method
     """
+    # The sorting of both dataframes by their reference column ensures that for the different pop methods,
+    # we get the exact same indices. It matters when it comes to the train/test splits and cross-validation
+    # folds, since we generate the indices based on the initial order of the dataframe.
     df_x_all = pd.concat([dfs_x[k].assign(common_key=dfs_x[k][x_refcol].apply(lambda name: name + '_' + k).
                                    assign(time_period=k))
-                          for k in dfs_x])
+                          for k in dfs_x]).sort_values(by=x_refcol)
     df_y_all = pd.concat([dfs_y[k].assign(common_key=dfs_y[k][y_refcol].apply(lambda name: name + '_' + k))
-                          for k in dfs_y])
+                          for k in dfs_y]).sort_values(by=y_refcol)
     datapoints_with_ground_truth_indices = invert_dict(dict(enumerate(df_y_all.common_key.values.tolist())))
     datapoints_no_ground_truth_indices = [x for x in df_x_all.common_key.values if x not in df_y_all.common_key.values]
     datapoints_no_ground_truth_indices = {datapoints_no_ground_truth_indices[i]:
@@ -71,7 +76,7 @@ def reformat_y(df_y_ground_truths, time_periods=TIME_PERIODS, ref_col = 'Skills'
         result_dict[time_period_key] = new_df[[ref_col, TRUTH_COL]]
     return result_dict
 
-def create_train_test_split(x_datapoints, y_datapoints, test_proportion=0.2, class_balanced=True):
+def create_train_test_split(x_datapoints, y_datapoints, test_proportion=0.2, class_balanced=True, random_state=1):
     """
     Creates a training-test split which is
     :param x_datapoints: The x df
@@ -81,11 +86,12 @@ def create_train_test_split(x_datapoints, y_datapoints, test_proportion=0.2, cla
     to sample it fully randomly.
     :return: The training and test x dataframes, the training and test y dataframes
 
-    RUN ONCE (all the different methods and hyperparameters should have the exact same split).
+    RUN ONCE per pop method (all the different methods and hyperparameters should have the exact same split).
     """
     if class_balanced:
         sampled_test_y_df = y_datapoints.groupby(TRUTH_COL)[['common_index', 'common_key']].\
-                        apply(pd.DataFrame.sample, frac=test_proportion).reset_index().drop(columns=['level_1']).\
+                        apply(pd.DataFrame.sample, frac=test_proportion, random_state=random_state).\
+                        reset_index().drop(columns=['level_1']).\
                         sort_values('common_index')
     else:
         sampled_test_y_df = y_datapoints.sample(frac=test_proportion).reset_index().drop(columns=['index'])
@@ -188,7 +194,8 @@ def predict_results_vec(clf_model, x_mat, pred_indices=None, reference_indices=N
         y_pred = fill_in_prediction_blanks(y_pred, pred_indices, reference_indices)
     return y_pred
 
-def predict_results_df(clf_model, x_datapoints, reference_indices=None, rawpop_upper_bounds=None, normaliser=None):
+def predict_results_df(clf_model, x_datapoints, reference_indices=None, rawpop_upper_bounds=None, normaliser=None,
+                       features_col=FEATURE_COL):
     """
     Takes a model and its input, optionally filters out the default negatives, then predicts labels for the given input
     and optionally for datapoints absent from the input, and returns the result.
@@ -203,7 +210,7 @@ def predict_results_df(clf_model, x_datapoints, reference_indices=None, rawpop_u
     """
     if rawpop_upper_bounds is not None:
         x_datapoints, discard = filter_out_negatives(x_datapoints, rawpop_upper_bounds)
-    x_mat, discard, pred_indices = get_indices_and_matrices(x_datapoints, None)
+    x_mat, discard, pred_indices = get_indices_and_matrices(x_datapoints, None, features_col=features_col)
     return predict_results_vec(clf_model, x_mat, pred_indices, reference_indices, normaliser)
 
 
@@ -239,7 +246,7 @@ def predict_and_evaluate_for_validation(clf_model, x_mat, y_vec,
     recall = evaluation[0]/(evaluation[0]+evaluation[2]+default_fn)
     return y_pred, 2*prec*recall/(prec+recall)
 
-def generate_cv_folds(x_train_df, y_train_df, cv_folds=CV_FOLDS, stratified=True):
+def generate_cv_folds(x_train_df, y_train_df, cv_folds=CV_FOLDS, stratified=True, random_state=1):
     """
     Generates cross-validation folds, consisting of a list of tuples of tuples,
     like [((trainx, trainy), (valx, valy)), ...].
@@ -256,9 +263,9 @@ def generate_cv_folds(x_train_df, y_train_df, cv_folds=CV_FOLDS, stratified=True
     x_train_df, y_train_df = filter_out_negatives(x_train_df, None, y_train_df,
                                                   return_fns=False)
     if stratified:
-        model = StratifiedKFold(n_splits=cv_folds, shuffle=False)
+        model = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
     else:
-        model = KFold(n_splits=cv_folds, shuffle=False)
+        model = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
 
     resulting_indices = [index_pair for index_pair in model.split(x_train_df, y_train_df)]
     # The result. index_pair[0] has the training indices for each fold and index_pair[1] has the validation indices.
@@ -268,7 +275,7 @@ def generate_cv_folds(x_train_df, y_train_df, cv_folds=CV_FOLDS, stratified=True
     return resulting_dfs
 
 
-def train_logreg_model(x_df, y_df, c, rawpop_upper_bounds, normaliser=None):
+def train_logreg_model(x_df, y_df, c, rawpop_upper_bounds, normaliser=None, features_col=FEATURE_COL):
     """
     Trains a logistic regression model with the given hyperparameter and rawpop upper bounds using the data in the
     two given dataframes (x and y).
@@ -282,7 +289,8 @@ def train_logreg_model(x_df, y_df, c, rawpop_upper_bounds, normaliser=None):
     modified_x_df, modified_y_df = filter_out_negatives(x_df, rawpop_upper_bounds,
                                                         y_df,
                                                         return_fns=False)
-    X_mat_train, y_vec_train, pred_indices_train = get_indices_and_matrices(modified_x_df, modified_y_df)
+    X_mat_train, y_vec_train, pred_indices_train = get_indices_and_matrices(modified_x_df, modified_y_df,
+                                                                            features_col=features_col)
     if normaliser is not None:
         current_normaliser = normaliser.copy()
         X_mat_train = current_normaliser.fit_transform(X_mat_train)
@@ -293,7 +301,7 @@ def train_logreg_model(x_df, y_df, c, rawpop_upper_bounds, normaliser=None):
     return current_model, current_normaliser
 
 
-def cross_validate_model(cv_data, rawpop_upper_bounds, normaliser=None):
+def cross_validate_model(cv_data, rawpop_upper_bounds, normaliser=None, verbose=True, features_col=FEATURE_COL):
     """
 
     :param cv_data: Cross-validation data, consisting of a list of tuples of tuples,
@@ -307,16 +315,21 @@ def cross_validate_model(cv_data, rawpop_upper_bounds, normaliser=None):
 
     scores = list()
     for c in C_LIST:
+        if verbose:
+            print('C: ' + str(c) + '\n\n-----------\n\n')
         f1_score_values = list()
         for current_train, current_test in cv_data:
             current_x_df_train, current_y_df_train = current_train
             current_x_df_test, current_y_df_test = current_test
             current_model, current_normaliser = train_logreg_model(current_x_df_train, current_y_df_train, c,
-                                                                   rawpop_upper_bounds, normaliser)
+                                                                   rawpop_upper_bounds, normaliser, features_col)
             current_y_pred, current_f1 = predict_and_evaluate_dfs(current_model, current_x_df_test, current_y_df_test,
                                      rawpop_upper_bounds, current_normaliser)
             f1_score_values.append(current_f1)
-        scores.append((sum(f1_score_values)/CV_FOLDS))
+        averaged_score = sum(f1_score_values)/CV_FOLDS
+        if verbose:
+            print('Avg score: '+str(averaged_score)+'\n\n**********\n\n')
+        scores.append(averaged_score)
 
     scores = np.array(scores)
     best_score = np.max(scores)
@@ -325,8 +338,28 @@ def cross_validate_model(cv_data, rawpop_upper_bounds, normaliser=None):
     # of the first element of cv_data: x_train with x_val and y_train with y_val, and the C provided is best_c.
     best_model = train_logreg_model(pd.concat([cv_data[0][0][0], cv_data[0][1][0]], axis=0),
                                     pd.concat([cv_data[0][0][1], cv_data[0][1][1]], axis=0),
-                                    best_c, rawpop_upper_bounds, normaliser)
+                                    best_c, rawpop_upper_bounds, normaliser, features_col)
     return best_model, best_c, best_score
+
+def cross_validate_with_quantile(cv_data, period_to_df, normaliser=None, verbose=True, features_col=FEATURE_COL):
+    scores = list()
+    models = list()
+    cs = list()
+    for q in QUANTILES:
+        if verbose:
+            print('QUANTILE: '+str(q)+'\n\n-----------\n\n')
+        rawpop_upper_bound = compute_time_period_rawpop_quantile_thresholds(period_to_df, q)
+        current_best_model, current_best_c, current_best_score = \
+                                        cross_validate_model(cv_data, rawpop_upper_bound, normaliser, features_col)
+        scores.append(current_best_score)
+        models.append(current_best_model)
+        cs.append(current_best_c)
+    best_score = np.max(scores)
+    best_model = models[np.argmax(scores)]
+    best_c = cs[np.argmax(scores)]
+
+    return best_model, best_c, best_score
+
 
 
 def interpret_model(clf_model, feature_names, n_features=None):
