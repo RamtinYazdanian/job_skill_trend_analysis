@@ -1,7 +1,8 @@
 SMOOTH_N = 3
 SMOOTH_ALPHA = 0.4
 
-FEATURE_NAMES = {'linreg': ['Velocity', 'Acceleration', 'Spikiness', 'Intercept']
+FEATURE_NAMES = {'linreg': ['Velocity', 'Acceleration', 'Spikiness', 'Intercept'],
+                 'linreg_nointercept': ['Velocity', 'Acceleration', 'Spikiness'],
                  }
 
 QUESTION_NAMES = {0: 'Main', 1: 'YesCol', 2: 'NoCol'}
