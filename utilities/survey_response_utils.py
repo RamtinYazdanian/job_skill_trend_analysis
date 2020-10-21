@@ -23,7 +23,7 @@ def get_free_text_results(df, col_type='Skills'):
     return result.explode(col_type + ', free text')
 
 
-def get_responses_in_rows(initial_dfs, col_type='Skills', filter_nonsense=True):
+def get_responses_in_rows(initial_dfs, col_type='Skills', filter_nonsense=True, keep_unfinished=False):
     """
     Turns the dataframe from the original Qualtrics format into the final desired format, where each row is identified
     by *one* skill/firm and where the columns contain *one person's* responses for that skill/firm. Also returns the
@@ -41,10 +41,14 @@ def get_responses_in_rows(initial_dfs, col_type='Skills', filter_nonsense=True):
     assert col_type in ['Skills', 'Firms']
 
     all_cols = initial_dfs[0].columns
-    cols_to_keep = [colname for colname in all_cols if colname.split(',')[0] == col_type]
+    cols_to_keep = [colname for colname in all_cols if colname.split(',')[0] == col_type or colname == 'Finished']
     initial_dfs = [df[cols_to_keep] for df in initial_dfs]
     initial_dfs = [initial_dfs[0]] + [initial_dfs[i].iloc[2:] for i in range(1,len(initial_dfs))]
     dfs = pd.concat(initial_dfs, axis=0)
+
+    if not keep_unfinished:
+        dfs = dfs.loc[dfs['Finished'] != 'FALSE']
+    dfs = dfs.drop(columns=['Finished'])
 
     question_type_cols = [[colname for colname in dfs.columns if 'grid#'+str(i)+'_' in colname] for i in range(1,4)]
     old_to_new_names = [
@@ -66,12 +70,13 @@ def get_responses_in_rows(initial_dfs, col_type='Skills', filter_nonsense=True):
         # Filters out the responses where the main answer is NaN
         df_final = df_final.loc[~df_final['Main'].isnull()]
         # Corrects responses where, for example, the respondent didn't say No, but still chose an option in the NoCol
-        df_final['YesCol'] = df_final.apply(lambda x: x['YesCol'] if x['Main'] == YES else np.nan)
-        df_final['NoCol'] = df_final.apply(lambda x: x['NoCol'] if x['Main'] == NO else np.nan)
+        df_final['YesCol'] = df_final.apply(lambda x: x['YesCol'] if x['Main'] == YES else np.nan, axis=1)
+        df_final['NoCol'] = df_final.apply(lambda x: x['NoCol'] if x['Main'] == NO else np.nan, axis=1)
 
-    free_text_results = get_free_text_results(dfs, col_type)
+    #free_text_results = get_free_text_results(dfs, col_type)
 
-    return df_final, free_text_results
+    #return df_final, free_text_results
+    return df_final
 
 def does_overlap(time_period_pair):
     starts = [int(x.split('-')[0]) for x in time_period_pair]
@@ -138,7 +143,10 @@ def assemble_question_responses(initial_dfs, has_firms=True):
         firms = None
     return skills, firms
 
-def get_response_proportions(df, col_type='Skills', col_to_analyse='Main'):
+def get_response_proportions(df, col_type='Skills', col_to_analyse='Main', convert_all_nos=False):
+    df = df.copy()
+    if convert_all_nos:
+        df[col_to_analyse] = df.apply(lambda x: x['Main'] if x['YesCol'] != BEFORE17 else NO, axis=1)
     df = df[[col_type, col_to_analyse]].groupby(col_type).agg(list).reset_index()
     df[col_to_analyse] = df[col_to_analyse].apply(remove_list_nans)
     df[col_to_analyse+'_response_count'] = df[col_to_analyse].apply(len)
@@ -163,7 +171,7 @@ def get_value_counts_for_agreement(df, col_to_analyse, remove_unsure=False):
     df = df[cols_to_keep]
     return df.values
 
-def get_interrater_agreement(df, col_type='Skill', remove_unsure=False):
+def get_interrater_agreement(df, col_type='Skills', remove_unsure=False):
     df = get_response_proportions(df, col_type, 'Main')
     value_counts = get_value_counts_for_agreement(df, 'Main', remove_unsure)
     return krippendorff.alpha(value_counts=value_counts, level_of_measurement='nominal')

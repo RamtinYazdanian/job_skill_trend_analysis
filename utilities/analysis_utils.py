@@ -176,6 +176,9 @@ def extract_timeseries_features(df, y_col='Job Postings', extraction_methods=FEA
         if extraction_method == 'linreg':
             results.append(linreg_jobpostings(df, y_col=y_col, normaliser=normaliser, smooth=smooth,
                                       log=current_params['log'], degree=current_params['degree']))
+        if extraction_method == 'linreg_nointercept':
+            results.append(linreg_jobpostings(df, y_col=y_col, normaliser=normaliser, smooth=smooth,
+                                              log=current_params['log'], degree=current_params['degree'])[:-1])
         elif extraction_method == 'tsfresh':
             pass
         else:
@@ -185,10 +188,10 @@ def extract_timeseries_features(df, y_col='Job Postings', extraction_methods=FEA
 
 
 
-def get_trend_slope_intercept(group_col_and_trends, feature_names):
+def get_trend_slope_intercept(group_col_and_trends, feature_names, feature_col=FEATURE_COL):
     for i in range(len(feature_names)):
         feature_name = feature_names[i]
-        group_col_and_trends[feature_name] = group_col_and_trends['Features'].apply(lambda x: x[i] if not
+        group_col_and_trends[feature_name] = group_col_and_trends[feature_col].apply(lambda x: x[i] if not
                                                                                    pd.isna(x) else np.nan)
     return group_col_and_trends
 
@@ -258,7 +261,7 @@ def skill_trend_features_wrapper(df, starting_date, end_date, total_values, min_
     df = get_period_of_time(df, starting_date, end_date).copy()
     skills_raw_sums = df[['Skill', 'Job Postings Raw']].groupby('Skill').sum()
 
-    df = get_skill_pop_time_series(df, params, pop_type)
+    df = get_skill_pop_time_series(df, pop_type, params)
 
 
     df_with_trends_pooled = pd.DataFrame(
@@ -295,7 +298,7 @@ def compile_all_feature_dfs(df, time_periods, total_values, min_freq=1, feature_
     for time_period_key in time_periods:
         time_period = time_periods[time_period_key]
         results[time_period_key] = skill_trend_features_wrapper(df, time_period[0], time_period[1],
-                                 total_values[time_period], min_freq=min_freq, feature_types=feature_types,
+                                 total_values, min_freq=min_freq, feature_types=feature_types,
                                  nafill=nafill, pop_type=pop_type, smoothing=smoothing, params=params, weights=weights)
     return results
 

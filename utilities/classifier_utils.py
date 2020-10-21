@@ -4,6 +4,7 @@ from utilities.pandas_utils import *
 from sklearn.metrics import precision_recall_fscore_support, f1_score, confusion_matrix
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedKFold, KFold
+from sklearn.base import clone as sklearn_clone
 
 from utilities.params import FEATURE_COL, TIME_PERIODS, CV_FOLDS, C_LIST, QUANTILES
 
@@ -31,12 +32,15 @@ def skills_to_indices(dfs_x, dfs_y, x_refcol=X_REFCOL, y_refcol=Y_REFCOL):
     # The sorting of both dataframes by their reference column ensures that for the different pop methods,
     # we get the exact same indices. It matters when it comes to the train/test splits and cross-validation
     # folds, since we generate the indices based on the initial order of the dataframe.
-    df_x_all = pd.concat([dfs_x[k].assign(common_key=dfs_x[k][x_refcol].apply(lambda name: name + '_' + k).
-                                   assign(time_period=k))
-                          for k in dfs_x]).sort_values(by=x_refcol)
+    df_x_all = pd.concat([dfs_x[k].reset_index().assign(time_period=k).
+                         assign(common_key=dfs_x[k].reset_index()[x_refcol].apply(lambda name: name + '_' + k))
+                          for k in dfs_x], axis=0).reset_index().drop(columns=['index']).sort_values('common_key')
+    print(df_x_all.head())
     df_y_all = pd.concat([dfs_y[k].assign(common_key=dfs_y[k][y_refcol].apply(lambda name: name + '_' + k))
-                          for k in dfs_y]).sort_values(by=y_refcol)
+                          for k in dfs_y]).reset_index().drop(columns=['index']).sort_values('common_key')
+    print(df_y_all.head())
     datapoints_with_ground_truth_indices = invert_dict(dict(enumerate(df_y_all.common_key.values.tolist())))
+    #print(datapoints_with_ground_truth_indices)
     datapoints_no_ground_truth_indices = [x for x in df_x_all.common_key.values if x not in df_y_all.common_key.values]
     datapoints_no_ground_truth_indices = {datapoints_no_ground_truth_indices[i]:
                                               len(datapoints_with_ground_truth_indices)+i
@@ -45,14 +49,14 @@ def skills_to_indices(dfs_x, dfs_y, x_refcol=X_REFCOL, y_refcol=Y_REFCOL):
     datapoints_all_indices.update(datapoints_no_ground_truth_indices)
 
     df_x_datapoints_with_ground_truth = df_x_all.loc[df_x_all.common_key.apply(lambda x:
-                                                         x in datapoints_with_ground_truth_indices.values())].copy()
+                                                         x in datapoints_with_ground_truth_indices.keys())].copy()
     df_x_datapoints_with_ground_truth['common_index'] = \
                         df_x_datapoints_with_ground_truth.common_key.apply(lambda x:
-                                                   datapoints_with_ground_truth_indices[x]).sort_values('common_index')
+                                                   datapoints_with_ground_truth_indices[x])
     df_y_all['common_index'] = \
-                df_y_all.common_key.apply(lambda x: datapoints_with_ground_truth_indices[x]).sort_values('common_index')
+                df_y_all.common_key.apply(lambda x: datapoints_with_ground_truth_indices[x])
     df_x_all['common_index'] = \
-                df_x_all.common_key.apply(lambda x: datapoints_all_indices[x]).sort_values('common_index')
+                df_x_all.common_key.apply(lambda x: datapoints_all_indices[x])
 
     return df_x_datapoints_with_ground_truth, df_y_all, df_x_all, datapoints_all_indices
 
@@ -172,11 +176,17 @@ def fill_in_prediction_blanks(y_predicted, pred_indices, all_indices):
 
     RUN FOR EACH RUN OF filter_out_negatives (AFTER PREDICTION, USED TO CALCULATE FINAL F1 SCORE)
     """
+    if len(pred_indices) == len(all_indices):
+        return y_predicted
+    print(len(y_predicted))
+    print(len(pred_indices))
+    print(len(all_indices))
     y_result = np.zeros(len(all_indices))
     pred_current_index_pos = 0
     all_current_index_pos = 0
     while all_current_index_pos < len(all_indices):
-        if pred_indices[pred_current_index_pos] == all_indices[all_current_index_pos]:
+        if pred_current_index_pos < len(pred_indices) and \
+                pred_indices[pred_current_index_pos] == all_indices[all_current_index_pos]:
             y_result[all_current_index_pos] = y_predicted[pred_current_index_pos]
             pred_current_index_pos += 1
             all_current_index_pos += 1
@@ -189,7 +199,8 @@ def predict_results_vec(clf_model, x_mat, pred_indices=None, reference_indices=N
     if normaliser is not None:
         y_pred = clf_model.predict(normaliser.transform(x_mat))
     else:
-        y_pred = clf_model.predict(x_mat)
+        y_pred = clf_model.predict(np.array([np.array(x) for x in x_mat]))
+    print(y_pred)
     if pred_indices is not None and reference_indices is not None:
         y_pred = fill_in_prediction_blanks(y_pred, pred_indices, reference_indices)
     return y_pred
@@ -225,7 +236,7 @@ def evaluate_results(y_pred, y_truth, type='f1'):
 
 
 def predict_and_evaluate_dfs(clf_model, x_datapoints, y_datapoints,
-                             rawpop_upper_bounds=None, normaliser=None, eval_type='f1'):
+                             rawpop_upper_bounds=None, normaliser=None, eval_type='f1', features_col=FEATURE_COL):
     """
     Wrapper for predicting and evaluating the predictions.
     :param clf_model: Classifier model
@@ -235,17 +246,10 @@ def predict_and_evaluate_dfs(clf_model, x_datapoints, y_datapoints,
     :param normaliser: Normaliser object
     :return: Predicted y and evaluation metric result
     """
-    y_pred = predict_results_df(clf_model, x_datapoints, y_datapoints.common_index.values, rawpop_upper_bounds, normaliser)
+    y_pred = predict_results_df(clf_model, x_datapoints, y_datapoints.common_index.values, rawpop_upper_bounds,
+                                normaliser=normaliser, features_col=features_col)
     evaluation = evaluate_results(y_pred, y_datapoints[TRUTH_COL].values, eval_type)
     return y_pred, evaluation
-
-def predict_and_evaluate_for_validation(clf_model, x_mat, y_vec,
-                                        pred_indices=None, reference_indices=None, normaliser=None, default_fn=0):
-    y_pred = predict_results_vec(clf_model, x_mat, pred_indices, reference_indices, normaliser)
-    evaluation = evaluate_results(y_pred, y_vec, type='tpfpfn')
-    prec = evaluation[0]/(evaluation[0]+evaluation[1])
-    recall = evaluation[0]/(evaluation[0]+evaluation[2]+default_fn)
-    return y_pred, 2*prec*recall/(prec+recall)
 
 def generate_cv_folds(x_train_df, y_train_df, cv_folds=CV_FOLDS, stratified=True, random_state=1):
     """
@@ -263,12 +267,16 @@ def generate_cv_folds(x_train_df, y_train_df, cv_folds=CV_FOLDS, stratified=True
     # validation F1 score.
     x_train_df, y_train_df = filter_out_negatives(x_train_df, None, y_train_df,
                                                   return_fns=False)
+    x_train_df = x_train_df.sort_values('common_index').reset_index().drop(columns=['index'])
+    y_train_df = y_train_df.sort_values('common_index').reset_index().drop(columns=['index'])
+
     if stratified:
         model = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
     else:
         model = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
 
-    resulting_indices = [index_pair for index_pair in model.split(x_train_df, y_train_df)]
+
+    resulting_indices = [index_pair for index_pair in model.split(x_train_df, None)]
     # The result. index_pair[0] has the training indices for each fold and index_pair[1] has the validation indices.
     resulting_dfs = [((x_train_df.iloc[index_pair[0]], y_train_df.iloc[index_pair[0]]),
                       (x_train_df.iloc[index_pair[1]], y_train_df.iloc[index_pair[1]]))
@@ -293,7 +301,7 @@ def train_logreg_model(x_df, y_df, c, rawpop_upper_bounds, normaliser=None, feat
     X_mat_train, y_vec_train, pred_indices_train = get_indices_and_matrices(modified_x_df, modified_y_df,
                                                                             features_col=features_col)
     if normaliser is not None:
-        current_normaliser = normaliser.copy()
+        current_normaliser = sklearn_clone(normaliser)
         X_mat_train = current_normaliser.fit_transform(X_mat_train)
     else:
         current_normaliser = None
@@ -313,7 +321,6 @@ def cross_validate_model(cv_data, rawpop_upper_bounds, normaliser=None, verbose=
 
     RUN FOR EACH HYPERPARAMETER SET (Logreg C and rawpop upper bound)
     """
-
     scores = list()
     for c in C_LIST:
         if verbose:
@@ -323,7 +330,8 @@ def cross_validate_model(cv_data, rawpop_upper_bounds, normaliser=None, verbose=
             current_x_df_train, current_y_df_train = current_train
             current_x_df_test, current_y_df_test = current_test
             current_model, current_normaliser = train_logreg_model(current_x_df_train, current_y_df_train, c,
-                                                                   rawpop_upper_bounds, normaliser, features_col)
+                                                                   rawpop_upper_bounds, normaliser=normaliser,
+                                                                   features_col=features_col)
             current_y_pred, current_f1 = predict_and_evaluate_dfs(current_model, current_x_df_test, current_y_df_test,
                                      rawpop_upper_bounds, current_normaliser)
             f1_score_values.append(current_f1)
@@ -346,26 +354,32 @@ def cross_validate_with_quantile(cv_data, period_to_df, normaliser=None, verbose
     scores = list()
     models = list()
     cs = list()
+    qs = list()
     for q in QUANTILES:
         if verbose:
             print('QUANTILE: '+str(q)+'\n\n-----------\n\n')
         rawpop_upper_bound = compute_time_period_rawpop_quantile_thresholds(period_to_df, q)
         current_best_model, current_best_c, current_best_score = \
-                                        cross_validate_model(cv_data, rawpop_upper_bound, normaliser, features_col)
+                                        cross_validate_model(cv_data, rawpop_upper_bound, normaliser=normaliser,
+                                                             features_col=features_col)
         scores.append(current_best_score)
         models.append(current_best_model)
         cs.append(current_best_c)
+        qs.append(q)
     best_score = np.max(scores)
     best_model = models[np.argmax(scores)]
     best_c = cs[np.argmax(scores)]
+    best_q = qs[np.argmax(scores)]
 
-    return best_model, best_c, best_score
+    return best_model, best_c, best_q, best_score
 
 
 
 def interpret_model(clf_model, feature_names, n_features=None):
-    interpretation_df = pd.DataFrame({'Name': ['s_min']+feature_names,
-                                      'Score': [-clf_model.intercept_] + clf_model.coef_.tolist()})
+    scores = [-clf_model.intercept_[0]] + clf_model.coef_.flatten().tolist()
+    names = ['s_min']+feature_names
+    interpretation_df = pd.DataFrame({'Name': names,
+                                      'Score': scores})
     interpretation_df = interpretation_df.sort_values('Score', ascending=False)
     if n_features is None:
         return interpretation_df
