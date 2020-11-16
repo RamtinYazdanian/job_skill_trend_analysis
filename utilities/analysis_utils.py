@@ -2,9 +2,11 @@ import pandas as pd
 import numpy as np
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PolynomialFeatures
-from utilities.pandas_utils import get_period_of_time
+from sklearn.decomposition import PCA, TruncatedSVD
+from utilities.pandas_utils import *
 from utilities.constants import *
 from utilities.params import *
+from tsfresh import extract_features
 
 def divide_into_periods(df, cols, start_date=None, end_date=None, result_col_name='Count'):
     df = get_period_of_time(df, start_date, end_date).copy()
@@ -125,7 +127,7 @@ def smooth_and_normalise_timeseries(df, log, normaliser=None, smooth=None, y_col
     if not return_df:
         return X, y
     else:
-        return pd.DataFrame({'Date': X, y_col: y})
+        return pd.DataFrame({'Date': X.flatten(), y_col: y})
 
 def linreg_jobpostings(df, y_col='Job Postings', normaliser=None, smooth='exp', log=True, degree=2):
     X, y = smooth_and_normalise_timeseries(df, log, normaliser, smooth, y_col)
@@ -147,6 +149,11 @@ def linreg_jobpostings(df, y_col='Job Postings', normaliser=None, smooth='exp', 
         else:
             return np.array([result_model.coef_[0][0], result_model.coef_[1][0],
                              spike_value, result_model.intercept_[0]])
+
+def tsfresh_jobpostings(df, y_col='Job Postings', normaliser=None, smooth=None, log=True):
+    smoothed_df = smooth_and_normalise_timeseries(df, log, normaliser, smooth, y_col, return_df=True)
+    smoothed_df['id_col'] = 0
+    return extract_features(smoothed_df, column_sort='Date', column_value=y_col, column_id='id_col').iloc[0].values
 
 
 def extract_timeseries_features(df, y_col='Job Postings', extraction_methods=FEATURES_TO_COMPUTE,
@@ -179,8 +186,9 @@ def extract_timeseries_features(df, y_col='Job Postings', extraction_methods=FEA
         if extraction_method == 'linreg_nointercept':
             results.append(linreg_jobpostings(df, y_col=y_col, normaliser=normaliser, smooth=smooth,
                                               log=current_params['log'], degree=current_params['degree'])[:-1])
-        elif extraction_method == 'tsfresh':
-            pass
+        if extraction_method == 'tsfresh':
+            results.append(
+                tsfresh_jobpostings(df, y_col=y_col, normaliser=normaliser, smooth=smooth, log=current_params['log']))
         else:
             results.append(None)
     return results
@@ -263,6 +271,7 @@ def skill_trend_features_wrapper(df, starting_date, end_date, total_values, min_
 
     df = get_skill_pop_time_series(df, pop_type, params)
 
+    print(params)
 
     df_with_trends_pooled = pd.DataFrame(
         fill_in_the_blank_dates(
@@ -274,6 +283,15 @@ def skill_trend_features_wrapper(df, starting_date, end_date, total_values, min_
     for i in range(len(feature_types)):
         feature_type = feature_types[i]
         df_with_trends_pooled[feature_type] = df_with_trends_pooled[0].apply(lambda x: x[i])
+        # if feature_type == 'tsfresh':
+        #     pca_model = PCA(n_components=TS_N_FEATURES)
+        #     features_matrix = series_to_matrix(df_with_trends_pooled[feature_type])
+        #     features_matrix = pca_model.fit_transform(features_matrix)
+        #     features_matrix = features_matrix.tolist()
+        #     df_with_trends_pooled[feature_type] = features_matrix
+        #     df_with_trends_pooled[feature_type] = df_with_trends_pooled[feature_type].apply(np.array)
+
+
     df_with_trends_pooled = df_with_trends_pooled.drop(columns=[0])
 
     # if weights is not None:
@@ -336,6 +354,27 @@ def investigate_skill_pop_profile(df, skill, pop_type, time_period=None, normali
     df = get_skill_pop_time_series(df.loc[df.Skill == skill].copy(), pop_type, params)
     return smooth_and_normalise_timeseries(df, params['log'], normaliser, smooth,
                                            date_to_step=False, return_df=True)
+
+
+def clean_nan_features(df_dict, colname='tsfresh', feature_names=None):
+    dict_keys = list(df_dict.keys())
+    features_matrix = np.vstack([series_to_matrix(df_dict[k][colname]) for k in dict_keys])
+    non_nan_cols = (~np.any(np.isnan(features_matrix), axis=0)) & (~np.any(np.isinf(features_matrix), axis=0))
+    features_matrix = features_matrix[:, non_nan_cols]
+    if feature_names is not None:
+        feature_names = [feature_names[i] for i in range(len(feature_names)) if non_nan_cols[i] == True]
+    # if n_features is not None:
+    #     reduction_model = TruncatedSVD(n_components=n_features)
+    #     features_matrix = reduction_model.fit_transform(features_matrix)
+    # else:
+    #     reduction_model = None
+    features_matrix = features_matrix.tolist()
+    current_index = 0
+    for k in dict_keys:
+        df_dict[k][colname] = features_matrix[current_index:current_index+df_dict[k].shape[0]]
+        df_dict[k][colname] = df_dict[k][colname].apply(np.array)
+        current_index = current_index+df_dict[k].shape[0]
+    return df_dict, feature_names
 
 
 def compute_total_poptype_mean(df, pop_type='log'):
@@ -588,4 +627,3 @@ def company_emerging_skill_wrapper(skills_df, set_of_companies, start_and_end_da
         for i in range(len(companies_skill_trends))]
 
     return companies_emerging_skills, companies_skill_trends
-

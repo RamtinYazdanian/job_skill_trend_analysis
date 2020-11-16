@@ -55,3 +55,6 @@ def filter_out_by_common_index(df_ref, df_target, index_col='common_index', retu
                df_target.loc[df_target[index_col].apply(lambda x: x not in df_ref[index_col].values)]
     else:
         return df_target.loc[df_target[index_col].apply(lambda x: x in df_ref[index_col].values)]
+
+def series_to_matrix(s):
+    return np.vstack(s.values.tolist())

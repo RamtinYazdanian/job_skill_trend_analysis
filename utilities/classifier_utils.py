@@ -1,10 +1,14 @@
 from utilities.analysis_utils import *
 from utilities.common_utils import *
 from utilities.pandas_utils import *
-from sklearn.metrics import precision_recall_fscore_support, f1_score, confusion_matrix
+from sklearn.metrics import precision_recall_fscore_support, f1_score, confusion_matrix, precision_score, accuracy_score
 from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC, LinearSVC
+from sklearn.tree import DecisionTreeClassifier
 from sklearn.model_selection import StratifiedKFold, KFold
 from sklearn.base import clone as sklearn_clone
+from collections import Counter
 
 from utilities.params import FEATURE_COL, TIME_PERIODS, CV_FOLDS, C_LIST, QUANTILES
 
@@ -93,20 +97,55 @@ def create_train_test_split(x_datapoints, y_datapoints, test_proportion=0.2, cla
     RUN ONCE per pop method (all the different methods and hyperparameters should have the exact same split).
     """
     if class_balanced:
-        sampled_test_y_df = y_datapoints.groupby(TRUTH_COL)[['common_index', 'common_key']].\
-                        apply(pd.DataFrame.sample, frac=test_proportion, random_state=random_state).\
-                        reset_index().drop(columns=['level_1']).\
-                        sort_values('common_index')
+        sampled_skills_y = y_datapoints[['Skills', TRUTH_COL]].groupby('Skills').apply(lambda x:
+                 Counter(list(x[TRUTH_COL])).most_common()[0][0]).reset_index().rename(columns={0: TRUTH_COL})
+        sampled_skills_y = sampled_skills_y.groupby(TRUTH_COL)[['Skills']].\
+            apply(pd.DataFrame.sample, frac=test_proportion, random_state=random_state).reset_index()['Skills'].values
     else:
-        sampled_test_y_df = y_datapoints.sample(frac=test_proportion).reset_index().drop(columns=['index'])
+        sampled_skills_y = y_datapoints[['Skills']].drop_duplicates()\
+                        .sample(frac=test_proportion)['Skills'].values
+
+    sampled_test_y_df = y_datapoints.loc[y_datapoints['Skills'].apply(lambda x: x in sampled_skills_y)].\
+                                                    reset_index().drop('index', axis=1).sort_values('common_index')
     sampled_train_y_df = y_datapoints.loc[y_datapoints.common_index.apply(lambda x:
-                                         x not in sampled_test_y_df.common_index.values)].sort_values('common_index')
+                                         x not in sampled_test_y_df.common_index.values)].\
+                                                    reset_index().drop('index', axis=1).sort_values('common_index')
     sampled_test_x_df = x_datapoints.loc[x_datapoints.common_index.apply(lambda x:
-                                         x in sampled_test_y_df.common_index.values)].sort_values('common_index')
+                                         x in sampled_test_y_df.common_index.values)].\
+                                                    reset_index().drop('index', axis=1).sort_values('common_index')
     sampled_train_x_df = x_datapoints.loc[x_datapoints.common_index.apply(lambda x:
-                                         x not in sampled_test_x_df.common_index.values)].sort_values('common_index')
+                                         x not in sampled_test_x_df.common_index.values)].\
+                                                    reset_index().drop('index', axis=1).sort_values('common_index')
 
     return sampled_train_x_df, sampled_test_x_df, sampled_train_y_df, sampled_test_y_df
+
+def pre_normalise_and_pca(sampled_train_x_df, sampled_test_x_df, n_features=50,
+                          pre_normaliser=None, post_normaliser=None, feature_col='tsfresh'):
+
+    train_features = series_to_matrix(sampled_train_x_df[feature_col])
+    test_features = series_to_matrix(sampled_test_x_df[feature_col])
+    if pre_normaliser is not None:
+        train_features = pre_normaliser.fit_transform(train_features)
+        test_features = pre_normaliser.transform(test_features)
+    if n_features is not None:
+        pca_model = PCA(n_components=n_features)
+        train_features = pca_model.fit_transform(train_features)
+        test_features = pca_model.transform(test_features)
+    else:
+        pca_model = None
+    if post_normaliser is not None:
+        if post_normaliser == 'unit':
+            train_features = train_features / np.linalg.norm(train_features, axis=1).\
+                                    reshape((train_features.shape[0], 1))
+            test_features = test_features / np.linalg.norm(test_features, axis=1). \
+                reshape((test_features.shape[0], 1))
+            post_normaliser = None
+        else:
+            train_features = post_normaliser.fit_transform(train_features)
+            test_features = post_normaliser.transform(test_features)
+    sampled_train_x_df[feature_col] = train_features.tolist()
+    sampled_test_x_df[feature_col] = test_features.tolist()
+    return sampled_train_x_df, sampled_test_x_df, pca_model, pre_normaliser, post_normaliser
 
 def filter_out_negatives(x_datapoints, rawpop_upper_bounds=None, y_datapoints=None, pop_col=POP_COL,
                          return_fns=False):
@@ -225,18 +264,23 @@ def predict_results_df(clf_model, x_datapoints, reference_indices=None, rawpop_u
     return predict_results_vec(clf_model, x_mat, pred_indices, reference_indices, normaliser)
 
 
-def evaluate_results(y_pred, y_truth, type='f1'):
+def evaluate_results(y_pred, y_truth, type='acc'):
     if type == 'prfs':
         return precision_recall_fscore_support(y_truth, y_pred, pos_label=1, average='binary')
     elif type == 'f1':
         return f1_score(y_truth, y_pred, pos_label=1, average='binary')
+    elif type == 'prec':
+        return precision_score(y_truth, y_pred, pos_label=1, average='binary')
+    elif type == 'acc':
+        return accuracy_score(y_truth, y_pred)
     elif type == 'tpfpfn':
         conf_mat = confusion_matrix(y_truth, y_pred)
         return conf_mat[1,1], conf_mat[0,1], conf_mat[1,0]
 
 
 def predict_and_evaluate_dfs(clf_model, x_datapoints, y_datapoints,
-                             rawpop_upper_bounds=None, normaliser=None, eval_type='f1', features_col=FEATURE_COL):
+                             rawpop_upper_bounds=None, normaliser=None, eval_type='f1', features_col=FEATURE_COL,
+                             return_modified_df=False):
     """
     Wrapper for predicting and evaluating the predictions.
     :param clf_model: Classifier model
@@ -249,7 +293,12 @@ def predict_and_evaluate_dfs(clf_model, x_datapoints, y_datapoints,
     y_pred = predict_results_df(clf_model, x_datapoints, y_datapoints.common_index.values, rawpop_upper_bounds,
                                 normaliser=normaliser, features_col=features_col)
     evaluation = evaluate_results(y_pred, y_datapoints[TRUTH_COL].values, eval_type)
-    return y_pred, evaluation
+    if not return_modified_df:
+        return y_pred, evaluation
+    else:
+        return y_pred, evaluation, \
+                    y_datapoints.copy().assign(pred=y_pred).loc[y_pred == 1], \
+                    y_datapoints.copy().assign(pred=y_pred).loc[y_datapoints.row_class == 1]
 
 def generate_cv_folds(x_train_df, y_train_df, cv_folds=CV_FOLDS, stratified=True, random_state=1):
     """
@@ -284,7 +333,7 @@ def generate_cv_folds(x_train_df, y_train_df, cv_folds=CV_FOLDS, stratified=True
     return resulting_dfs
 
 
-def train_logreg_model(x_df, y_df, c, rawpop_upper_bounds, normaliser=None, features_col=FEATURE_COL):
+def train_logreg_model(x_df, y_df, c, rawpop_upper_bounds, normaliser=None, features_col=FEATURE_COL, penalty='l2'):
     """
     Trains a logistic regression model with the given hyperparameter and rawpop upper bounds using the data in the
     two given dataframes (x and y).
@@ -295,6 +344,7 @@ def train_logreg_model(x_df, y_df, c, rawpop_upper_bounds, normaliser=None, feat
     :param normaliser: The normaliser, can be None.
     :return: The trained model
     """
+    print()
     modified_x_df, modified_y_df = filter_out_negatives(x_df, rawpop_upper_bounds,
                                                         y_df,
                                                         return_fns=False)
@@ -305,12 +355,67 @@ def train_logreg_model(x_df, y_df, c, rawpop_upper_bounds, normaliser=None, feat
         X_mat_train = current_normaliser.fit_transform(X_mat_train)
     else:
         current_normaliser = None
-    current_model = LogisticRegression(C=c)
+    current_model = LogisticRegression(C=c, max_iter=300, penalty=penalty)
+    current_model.fit(X_mat_train, y_vec_train)
+    return current_model, current_normaliser
+
+def train_svm(x_df, y_df, c, rawpop_upper_bounds, normaliser=None, features_col=FEATURE_COL, kernel='linear'):
+    """
+    Trains a logistic regression model with the given hyperparameter and rawpop upper bounds using the data in the
+    two given dataframes (x and y).
+    :param x_df: The x df
+    :param y_df: The y df
+    :param c: The regularisation hyperparameter
+    :param rawpop_upper_bounds: The upper bounds dictionary
+    :param normaliser: The normaliser, can be None.
+    :return: The trained model
+    """
+    print()
+    modified_x_df, modified_y_df = filter_out_negatives(x_df, rawpop_upper_bounds,
+                                                        y_df,
+                                                        return_fns=False)
+    X_mat_train, y_vec_train, pred_indices_train = get_indices_and_matrices(modified_x_df, modified_y_df,
+                                                                            features_col=features_col)
+    if normaliser is not None:
+        current_normaliser = sklearn_clone(normaliser)
+        X_mat_train = current_normaliser.fit_transform(X_mat_train)
+    else:
+        current_normaliser = None
+    # current_model = SVC(C=c, kernel=kernel)
+    current_model = LinearSVC(C=c)
+    current_model.fit(X_mat_train, y_vec_train)
+    return current_model, current_normaliser
+
+def train_decision_tree(x_df, y_df, c, rawpop_upper_bounds, normaliser=None, features_col=FEATURE_COL):
+    """
+    Trains a logistic regression model with the given hyperparameter and rawpop upper bounds using the data in the
+    two given dataframes (x and y).
+    :param x_df: The x df
+    :param y_df: The y df
+    :param c: The regularisation hyperparameter
+    :param rawpop_upper_bounds: The upper bounds dictionary
+    :param normaliser: The normaliser, can be None.
+    :return: The trained model
+    """
+    print()
+    modified_x_df, modified_y_df = filter_out_negatives(x_df, rawpop_upper_bounds,
+                                                        y_df,
+                                                        return_fns=False)
+    X_mat_train, y_vec_train, pred_indices_train = get_indices_and_matrices(modified_x_df, modified_y_df,
+                                                                            features_col=features_col)
+    if normaliser is not None:
+        current_normaliser = sklearn_clone(normaliser)
+        X_mat_train = current_normaliser.fit_transform(X_mat_train)
+    else:
+        current_normaliser = None
+    current_model = DecisionTreeClassifier(max_depth=c['max_depth'],
+                                           min_samples_split=c['min_samples_split'], max_features=c['max_features'])
     current_model.fit(X_mat_train, y_vec_train)
     return current_model, current_normaliser
 
 
-def cross_validate_model(cv_data, rawpop_upper_bounds, normaliser=None, verbose=True, features_col=FEATURE_COL):
+def cross_validate_model(cv_data, rawpop_upper_bounds, c_list,
+                         normaliser=None, verbose=True, features_col=FEATURE_COL, model_to_use='logreg'):
     """
 
     :param cv_data: Cross-validation data, consisting of a list of tuples of tuples,
@@ -322,19 +427,29 @@ def cross_validate_model(cv_data, rawpop_upper_bounds, normaliser=None, verbose=
     RUN FOR EACH HYPERPARAMETER SET (Logreg C and rawpop upper bound)
     """
     scores = list()
-    for c in C_LIST:
+    for c in c_list:
         if verbose:
             print('C: ' + str(c) + '\n\n-----------\n\n')
         f1_score_values = list()
         for current_train, current_test in cv_data:
             current_x_df_train, current_y_df_train = current_train
             current_x_df_test, current_y_df_test = current_test
-            current_model, current_normaliser = train_logreg_model(current_x_df_train, current_y_df_train, c,
+            if model_to_use == 'logreg':
+                current_model, current_normaliser = train_logreg_model(current_x_df_train, current_y_df_train, c,
                                                                    rawpop_upper_bounds, normaliser=normaliser,
                                                                    features_col=features_col)
-            current_y_pred, current_f1 = predict_and_evaluate_dfs(current_model, current_x_df_test, current_y_df_test,
-                                     rawpop_upper_bounds, current_normaliser)
-            f1_score_values.append(current_f1)
+            elif model_to_use == 'dt':
+                current_model, current_normaliser = train_decision_tree(current_x_df_train, current_y_df_train, c,
+                                                                       rawpop_upper_bounds, normaliser=normaliser,
+                                                                       features_col=features_col)
+            elif model_to_use == 'svm':
+                current_model, current_normaliser = train_svm(current_x_df_train, current_y_df_train, c,
+                                                              rawpop_upper_bounds, normaliser=normaliser,
+                                                              features_col=features_col)
+            current_y_pred, current_scoring_measure = \
+                                predict_and_evaluate_dfs(current_model, current_x_df_test, current_y_df_test,
+                                     rawpop_upper_bounds, current_normaliser, features_col=features_col)
+            f1_score_values.append(current_scoring_measure)
         averaged_score = sum(f1_score_values)/CV_FOLDS
         if verbose:
             print('Avg score: '+str(averaged_score)+'\n\n**********\n\n')
@@ -342,26 +457,37 @@ def cross_validate_model(cv_data, rawpop_upper_bounds, normaliser=None, verbose=
 
     scores = np.array(scores)
     best_score = np.max(scores)
-    best_c = C_LIST[np.argmax(scores)]
+    best_c = c_list[np.argmax(scores)]
     # To get the best model trained on *all* the training data (i.e. train + validation), we concatenate the contents
     # of the first element of cv_data: x_train with x_val and y_train with y_val, and the C provided is best_c.
-    best_model = train_logreg_model(pd.concat([cv_data[0][0][0], cv_data[0][1][0]], axis=0),
+    if model_to_use == 'logreg':
+        best_model = train_logreg_model(pd.concat([cv_data[0][0][0], cv_data[0][1][0]], axis=0),
                                     pd.concat([cv_data[0][0][1], cv_data[0][1][1]], axis=0),
                                     best_c, rawpop_upper_bounds, normaliser, features_col)
+    elif model_to_use == 'dt':
+        best_model = train_decision_tree(pd.concat([cv_data[0][0][0], cv_data[0][1][0]], axis=0),
+                                        pd.concat([cv_data[0][0][1], cv_data[0][1][1]], axis=0),
+                                        best_c, rawpop_upper_bounds, normaliser, features_col)
+    elif model_to_use == 'svm':
+        best_model = train_svm(pd.concat([cv_data[0][0][0], cv_data[0][1][0]], axis=0),
+                               pd.concat([cv_data[0][0][1], cv_data[0][1][1]], axis=0),
+                               best_c, rawpop_upper_bounds, normaliser, features_col)
     return best_model, best_c, best_score
 
-def cross_validate_with_quantile(cv_data, period_to_df, normaliser=None, verbose=True, features_col=FEATURE_COL):
+def cross_validate_with_quantile(cv_data, period_to_df, normaliser=None, verbose=True, features_col=FEATURE_COL,
+                                 c_list=C_LIST, quantiles=QUANTILES, model_to_use='logreg'):
     scores = list()
     models = list()
     cs = list()
     qs = list()
-    for q in QUANTILES:
+    print(features_col)
+    for q in quantiles:
         if verbose:
             print('QUANTILE: '+str(q)+'\n\n-----------\n\n')
         rawpop_upper_bound = compute_time_period_rawpop_quantile_thresholds(period_to_df, q)
         current_best_model, current_best_c, current_best_score = \
                                         cross_validate_model(cv_data, rawpop_upper_bound, normaliser=normaliser,
-                                                             features_col=features_col)
+                                                 features_col=features_col, c_list=c_list, model_to_use=model_to_use)
         scores.append(current_best_score)
         models.append(current_best_model)
         cs.append(current_best_c)
@@ -375,17 +501,44 @@ def cross_validate_with_quantile(cv_data, period_to_df, normaliser=None, verbose
 
 
 
-def interpret_model(clf_model, feature_names, n_features=None):
+def interpret_model(clf_model, feature_names, pca_model=None, n_features=None, dataframes=None, normaliser=None):
     scores = [-clf_model.intercept_[0]] + clf_model.coef_.flatten().tolist()
-    names = ['s_min']+feature_names
-    interpretation_df = pd.DataFrame({'Name': names,
-                                      'Score': scores})
+    if pca_model is None:
+        names = ['s_min']+feature_names
+        interpretation_df = pd.DataFrame({'Name': names,
+                                          'Score': scores})
+    else:
+        names = ['s_min']+list(range(len(clf_model.coef_.flatten())))
+        og_names = feature_names
+        features_list = ['None'] + [[(og_names[i], pca_model.components_[j,i])
+                                        for i in (np.argsort(pca_model.components_[j,:].flatten()))[-20:]][::-1]
+                                           for j in range(pca_model.components_.shape[0])]
+        interpretation_df = pd.DataFrame({'Name': names,
+                          'Score': scores,
+                          'Features': features_list})
+
+    if dataframes is not None:
+        if normaliser is None:
+            normaliser = StandardScaler(with_mean=False, with_std=False)
+            normaliser.fit(series_to_matrix(dataframes[0]))
+        interpretation_df['train_median'] = \
+            [0] + np.median(normaliser.transform(series_to_matrix(dataframes[0])), axis=0).flatten().tolist()
+        interpretation_df['test_median'] = \
+            [0] + np.median(normaliser.transform(series_to_matrix(dataframes[1])), axis=0).flatten().tolist()
+        interpretation_df['train_std'] = \
+            [0] + np.std(normaliser.transform(series_to_matrix(dataframes[0])), axis=0).flatten().tolist()
+        interpretation_df['test_std'] = \
+            [0] + np.std(normaliser.transform(series_to_matrix(dataframes[1])), axis=0).flatten().tolist()
+
     interpretation_df = interpretation_df.sort_values('Score', ascending=False)
     if n_features is None:
         return interpretation_df
     else:
-        return pd.concat([interpretation_df.loc[interpretation_df.Name == 's_min'], interpretation_df.head(n_features),
-                  interpretation_df.tail(n_features)], axis=0).drop_duplicates().sort_values('Score', ascending=False)
+        return pd.concat([interpretation_df.loc[interpretation_df.Name == 's_min'],
+                          interpretation_df.head(n_features),
+                          interpretation_df.tail(n_features)], axis=0). \
+            drop_duplicates().sort_values('Score', ascending=False)
+
 
 def get_error_rate_for_each_period(clf_model, x_datapoints, y_datapoints, time_periods,
                                    rawpop_upper_bounds=None, normaliser=None, eval_type='f1'):

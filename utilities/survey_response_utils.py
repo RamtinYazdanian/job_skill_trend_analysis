@@ -78,10 +78,15 @@ def get_responses_in_rows(initial_dfs, col_type='Skills', filter_nonsense=True, 
     #return df_final, free_text_results
     return df_final
 
-def does_overlap(time_period_pair):
-    starts = [int(x.split('-')[0]) for x in time_period_pair]
-    ends = [int(x.split('-')[1]) for x in time_period_pair]
-    return starts[0] < ends[1] and starts[1] < ends[0]
+def does_overlap(observed, ref):
+    observed_start = observed.split('-')[0]
+    ref_start = ref.split('-')[0]
+    ref_end = ref.split('-')[1]
+    if observed_start < ref_start:
+        return False
+    if ref_end <= observed_start:
+        return False
+    return True
 
 def in_depth_answer_to_ground_truth(df, col_type, time_periods=TIME_PERIODS):
     df['majority'] = df.apply(lambda x: 1 if Counter(x['Main'])[YES] >=
@@ -106,7 +111,7 @@ def in_depth_answer_to_ground_truth(df, col_type, time_periods=TIME_PERIODS):
         # in which each skill has either False or True, and at the end, we create a dictionary where each time period is
         # mapped to a list of the skills that had a True in that period's column.
 
-        new_period_col = df.apply(lambda x: (len([y for y in x['modified_yescol'] if does_overlap([time_period_key, y])]),
+        new_period_col = df.apply(lambda x: (len([y for y in x['modified_yescol'] if does_overlap(y, time_period_key)]),
                                              len(x['modified_yescol'])) if x['majority'] == 1 else (-1,-1), axis=1)
         new_period_col = new_period_col.apply(lambda x: x[0] >= x[1]/2 if x[1] > 0 else False)
         df[time_period_key] = new_period_col
