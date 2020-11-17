@@ -511,7 +511,7 @@ def interpret_model(clf_model, feature_names, pca_model=None, n_features=None, d
         names = ['s_min']+list(range(len(clf_model.coef_.flatten())))
         og_names = feature_names
         features_list = ['None'] + [[(og_names[i], pca_model.components_[j,i])
-                                        for i in (np.argsort(pca_model.components_[j,:].flatten()))[-20:]][::-1]
+                                        for i in (np.argsort(np.abs(pca_model.components_[j,:]).flatten()))[-20:]][::-1]
                                            for j in range(pca_model.components_.shape[0])]
         interpretation_df = pd.DataFrame({'Name': names,
                           'Score': scores,
@@ -526,9 +526,11 @@ def interpret_model(clf_model, feature_names, pca_model=None, n_features=None, d
         interpretation_df['test_median'] = \
             [0] + np.median(normaliser.transform(series_to_matrix(dataframes[1])), axis=0).flatten().tolist()
         interpretation_df['train_std'] = \
-            [0] + np.std(normaliser.transform(series_to_matrix(dataframes[0])), axis=0).flatten().tolist()
+            [0] + (np.quantile(normaliser.transform(series_to_matrix(dataframes[0])), q=0.75, axis=0) -
+                   np.quantile(normaliser.transform(series_to_matrix(dataframes[0])), q=0.25, axis=0)).flatten().tolist()
         interpretation_df['test_std'] = \
-            [0] + np.std(normaliser.transform(series_to_matrix(dataframes[1])), axis=0).flatten().tolist()
+            [0] + (np.quantile(normaliser.transform(series_to_matrix(dataframes[1])), q=0.75, axis=0) -
+                   np.quantile(normaliser.transform(series_to_matrix(dataframes[1])), q=0.25, axis=0)).flatten().tolist()
 
     interpretation_df = interpretation_df.sort_values('Score', ascending=False)
     if n_features is None:
