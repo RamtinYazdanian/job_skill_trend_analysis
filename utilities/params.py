@@ -3,11 +3,11 @@ import numpy as np
 FEATURE_COL='linreg_nointercept'
 
 TIME_PERIODS = {
-    # '2017-2018': (np.datetime64('2017-01-01'), np.datetime64('2018-01-01')),
-    # '2018-2019': (np.datetime64('2018-01-01'), np.datetime64('2019-01-01')),
-    # '2019-2020': (np.datetime64('2019-01-01'), np.datetime64('2020-01-01')),
-    # '2018-2020': (np.datetime64('2018-01-01'), np.datetime64('2020-01-01')),
-    # '2017-2019': (np.datetime64('2017-01-01'), np.datetime64('2019-01-01')),
+    '2017-2018': (np.datetime64('2017-01-01'), np.datetime64('2018-01-01')),
+    '2018-2019': (np.datetime64('2018-01-01'), np.datetime64('2019-01-01')),
+    '2019-2020': (np.datetime64('2019-01-01'), np.datetime64('2020-01-01')),
+    '2018-2020': (np.datetime64('2018-01-01'), np.datetime64('2020-01-01')),
+    '2017-2019': (np.datetime64('2017-01-01'), np.datetime64('2019-01-01')),
     '2017-2020': (np.datetime64('2017-01-01'), np.datetime64('2020-01-01'))
 }
 

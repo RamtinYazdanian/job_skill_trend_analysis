@@ -22,6 +22,11 @@ def delete_low_freq_skills(df, min_freq):
     low_count_skills = skill_counts.loc[skill_counts['Job Postings'] < min_freq].Skill.values
     return df.loc[df.Skill.apply(lambda x: x not in low_count_skills)]
 
+def fill_in_blank_dates_ref_df(df, ref_df, skill):
+    df = pd.merge(df[['Date', 'Job Postings']].copy(), ref_df, on='Date', how='outer')
+    df = df.fillna({'Job Postings': 0})
+    df['Skill'] = skill
+    return df
 
 def fill_in_the_blank_dates(df, method='zero', has_company=True):
     base_cols = ['Date']
@@ -92,6 +97,7 @@ def smooth_and_normalise_timeseries(df, log, normaliser=None, smooth=None, y_col
     """
 
     # Normalising and smoothing y
+    df = df.sort_values('Date')
     y = df[[y_col]].values
     if smooth is not None:
         if smooth == 'movingavg':
@@ -107,7 +113,9 @@ def smooth_and_normalise_timeseries(df, log, normaliser=None, smooth=None, y_col
                 normaliser = np.reshape(np.array(normaliser), newshape=y.shape)
             elif smooth == 'exp':
                 normaliser = normaliser[['Total']].ewm(alpha=SMOOTH_ALPHA, adjust=False).mean().values
-                np.reshape(normaliser[['Total']].values, newshape=y.shape)
+                np.reshape(normaliser, newshape=y.shape)
+        else:
+            normaliser = np.reshape(normaliser[['Total']].values, newshape=y.shape)
         if log:
             y = y - normaliser
         else:
@@ -239,7 +247,7 @@ def get_skill_pop_time_series(df, pop_type, params=None, y_col='Job Postings Raw
 
 def skill_trend_features_wrapper(df, starting_date, end_date, total_values, min_freq=1,
                                  feature_types=FEATURES_TO_COMPUTE,
-                                 nafill='zero', pop_type='log', smoothing='movingavg', params=None, weights=None):
+                                 nafill='zero', pop_type='log', smoothing=None, params=None, weights=None):
     """
 
     :param df: The dataframe. It dataframe needs to have the columns 'Date', 'Skill', and
@@ -333,7 +341,8 @@ def compute_time_period_rawpop_quantile_thresholds(period_to_df, q, pop_col='Job
     return {period: period_to_df[period][pop_col].quantile(q) for period in period_to_df}
 
 
-def investigate_skill_pop_profile(df, skill, pop_type, time_period=None, normaliser=None, smooth=None):
+def investigate_skill_pop_profile(df, skill, pop_type, time_period=None, normaliser=None, smooth=None,
+                                  ref_for_dates=None):
     """
     Provides the normalised and smoothed popularity time series of *one* skill so that it can be plotted.
     :param df: The dataframe containing all skills' time series at the company level
@@ -351,9 +360,18 @@ def investigate_skill_pop_profile(df, skill, pop_type, time_period=None, normali
         if normaliser is not None:
             normaliser = get_period_of_time(normaliser, time_period[0], time_period[1])
 
-    df = get_skill_pop_time_series(df.loc[df.Skill == skill].copy(), pop_type, params)
-    return smooth_and_normalise_timeseries(df, params['log'], normaliser, smooth,
-                                           date_to_step=False, return_df=True)
+    if normaliser is not None:
+        df = fill_in_blank_dates_ref_df(get_skill_pop_time_series(df.loc[df.Skill == skill].copy(), pop_type, params),
+                                    normaliser, skill)
+    else:
+        df = fill_in_blank_dates_ref_df(get_skill_pop_time_series(df.loc[df.Skill == skill].copy(), pop_type, params),
+                                    ref_for_dates, skill)
+    return smooth_and_normalise_timeseries(df, pop_type, normaliser, smooth,
+                                           date_to_step=False, return_df=True).assign(Skill=skill)
+
+def multiple_skill_pop_profiles(df, skills, pop_type, time_period=None, normaliser=None, smooth=None):
+    return pd.concat([investigate_skill_pop_profile(df, skill, pop_type, time_period, normaliser, smooth)
+                      for skill in skills])
 
 
 def clean_nan_features(df_dict, colname='tsfresh', feature_names=None):

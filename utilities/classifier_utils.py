@@ -1,7 +1,8 @@
 from utilities.analysis_utils import *
 from utilities.common_utils import *
 from utilities.pandas_utils import *
-from sklearn.metrics import precision_recall_fscore_support, f1_score, confusion_matrix, precision_score, accuracy_score
+from sklearn.metrics import precision_recall_fscore_support, f1_score, confusion_matrix, \
+                    precision_score, accuracy_score, recall_score
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC, LinearSVC
@@ -143,6 +144,8 @@ def pre_normalise_and_pca(sampled_train_x_df, sampled_test_x_df, n_features=50,
         else:
             train_features = post_normaliser.fit_transform(train_features)
             test_features = post_normaliser.transform(test_features)
+    sampled_train_x_df[feature_col+'_orig'] = sampled_train_x_df[feature_col]
+    sampled_test_x_df[feature_col + '_orig'] = sampled_test_x_df[feature_col]
     sampled_train_x_df[feature_col] = train_features.tolist()
     sampled_test_x_df[feature_col] = test_features.tolist()
     return sampled_train_x_df, sampled_test_x_df, pca_model, pre_normaliser, post_normaliser
@@ -271,6 +274,8 @@ def evaluate_results(y_pred, y_truth, type='acc'):
         return f1_score(y_truth, y_pred, pos_label=1, average='binary')
     elif type == 'prec':
         return precision_score(y_truth, y_pred, pos_label=1, average='binary')
+    elif type == 'recall':
+        return recall_score(y_truth, y_pred, pos_label=1, average='binary')
     elif type == 'acc':
         return accuracy_score(y_truth, y_pred)
     elif type == 'tpfpfn':
@@ -298,7 +303,8 @@ def predict_and_evaluate_dfs(clf_model, x_datapoints, y_datapoints,
     else:
         return y_pred, evaluation, \
                     y_datapoints.copy().assign(pred=y_pred).loc[y_pred == 1], \
-                    y_datapoints.copy().assign(pred=y_pred).loc[y_datapoints.row_class == 1]
+                    y_datapoints.copy().assign(pred=y_pred).loc[y_datapoints.row_class == 1],\
+                    y_datapoints.copy().assign(pred=y_pred)
 
 def generate_cv_folds(x_train_df, y_train_df, cv_folds=CV_FOLDS, stratified=True, random_state=1):
     """
@@ -415,7 +421,7 @@ def train_decision_tree(x_df, y_df, c, rawpop_upper_bounds, normaliser=None, fea
 
 
 def cross_validate_model(cv_data, rawpop_upper_bounds, c_list,
-                         normaliser=None, verbose=True, features_col=FEATURE_COL, model_to_use='logreg'):
+                         normaliser=None, verbose=True, features_col=FEATURE_COL, model_to_use='logreg', eval_type='f1'):
     """
 
     :param cv_data: Cross-validation data, consisting of a list of tuples of tuples,
@@ -448,7 +454,8 @@ def cross_validate_model(cv_data, rawpop_upper_bounds, c_list,
                                                               features_col=features_col)
             current_y_pred, current_scoring_measure = \
                                 predict_and_evaluate_dfs(current_model, current_x_df_test, current_y_df_test,
-                                     rawpop_upper_bounds, current_normaliser, features_col=features_col)
+                                     rawpop_upper_bounds, current_normaliser, features_col=features_col,
+                                                         eval_type=eval_type)
             f1_score_values.append(current_scoring_measure)
         averaged_score = sum(f1_score_values)/CV_FOLDS
         if verbose:
@@ -475,7 +482,7 @@ def cross_validate_model(cv_data, rawpop_upper_bounds, c_list,
     return best_model, best_c, best_score
 
 def cross_validate_with_quantile(cv_data, period_to_df, normaliser=None, verbose=True, features_col=FEATURE_COL,
-                                 c_list=C_LIST, quantiles=QUANTILES, model_to_use='logreg'):
+                                 c_list=C_LIST, quantiles=QUANTILES, model_to_use='logreg', eval_type='f1'):
     scores = list()
     models = list()
     cs = list()
@@ -487,7 +494,8 @@ def cross_validate_with_quantile(cv_data, period_to_df, normaliser=None, verbose
         rawpop_upper_bound = compute_time_period_rawpop_quantile_thresholds(period_to_df, q)
         current_best_model, current_best_c, current_best_score = \
                                         cross_validate_model(cv_data, rawpop_upper_bound, normaliser=normaliser,
-                                                 features_col=features_col, c_list=c_list, model_to_use=model_to_use)
+                                                 features_col=features_col, c_list=c_list, model_to_use=model_to_use,
+                                                             eval_type=eval_type)
         scores.append(current_best_score)
         models.append(current_best_model)
         cs.append(current_best_c)
@@ -501,8 +509,12 @@ def cross_validate_with_quantile(cv_data, period_to_df, normaliser=None, verbose
 
 
 
-def interpret_model(clf_model, feature_names, pca_model=None, n_features=None, dataframes=None, normaliser=None):
-    scores = [-clf_model.intercept_[0]] + clf_model.coef_.flatten().tolist()
+def interpret_model(clf_model, feature_names, feature_scores=None,
+                    pca_model=None, n_features=None, dataframes=None, normaliser=None):
+    if feature_scores is None:
+        scores = [-clf_model.intercept_[0]] + clf_model.coef_.flatten().tolist()
+    else:
+        scores = [-clf_model.intercept_[0]] + feature_scores.flatten().tolist()
     if pca_model is None:
         names = ['s_min']+feature_names
         interpretation_df = pd.DataFrame({'Name': names,
