@@ -355,6 +355,11 @@ def investigate_skill_pop_profile(df, skill, pop_type, time_period=None, normali
             for the skill in question.
     """
     params = dict()
+    if '_' in skill:
+        og_skill = skill
+        skill = skill.split('_')[0]
+    else:
+        og_skill = None
     if time_period is not None:
         df = get_period_of_time(df, time_period[0], time_period[1])
         if normaliser is not None:
@@ -366,8 +371,13 @@ def investigate_skill_pop_profile(df, skill, pop_type, time_period=None, normali
     else:
         df = fill_in_blank_dates_ref_df(get_skill_pop_time_series(df.loc[df.Skill == skill].copy(), pop_type, params),
                                     ref_for_dates, skill)
-    return smooth_and_normalise_timeseries(df, pop_type, normaliser, smooth,
+    if og_skill is None:
+        return smooth_and_normalise_timeseries(df, pop_type, normaliser, smooth,
                                            date_to_step=False, return_df=True).assign(Skill=skill)
+    else:
+        return smooth_and_normalise_timeseries(df, pop_type, normaliser, smooth,
+                                               date_to_step=False, return_df=True).assign(Skill=skill).\
+                                                assign(common_key=og_skill)
 
 def multiple_skill_pop_profiles(df, skills, pop_type, time_period=None, normaliser=None, smooth=None):
     return pd.concat([investigate_skill_pop_profile(df, skill, pop_type, time_period, normaliser, smooth)
