@@ -6,6 +6,8 @@ from sklearn.metrics import precision_recall_fscore_support, f1_score, confusion
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC, LinearSVC
+from sklearn.decomposition import PCA, TruncatedSVD
+from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.model_selection import StratifiedKFold, KFold
 from sklearn.base import clone as sklearn_clone
@@ -120,8 +122,8 @@ def create_train_test_split(x_datapoints, y_datapoints, test_proportion=0.2, cla
 
     return sampled_train_x_df, sampled_test_x_df, sampled_train_y_df, sampled_test_y_df
 
-def pre_normalise_and_pca(sampled_train_x_df, sampled_test_x_df, n_features=50,
-                          pre_normaliser=None, post_normaliser=None, feature_col='tsfresh'):
+def pre_normalise_and_pca(sampled_train_x_df, sampled_test_x_df, sampled_train_y_df, sampled_test_y_df, n_features=50,
+                          pre_normaliser=None, post_normaliser=None, feature_col='tsfresh', do_pca=True):
 
     train_features = series_to_matrix(sampled_train_x_df[feature_col])
     test_features = series_to_matrix(sampled_test_x_df[feature_col])
@@ -129,11 +131,19 @@ def pre_normalise_and_pca(sampled_train_x_df, sampled_test_x_df, n_features=50,
         train_features = pre_normaliser.fit_transform(train_features)
         test_features = pre_normaliser.transform(test_features)
     if n_features is not None:
-        pca_model = PCA(n_components=n_features)
-        train_features = pca_model.fit_transform(train_features)
-        test_features = pca_model.transform(test_features)
+        if do_pca:
+            feature_reduction_model = PCA(n_components=n_features)
+            train_features = feature_reduction_model.fit_transform(train_features)
+            test_features = feature_reduction_model.transform(test_features)
+        else:
+            feature_reduction_model = SelectKBest(score_func=mutual_info_classif, k=n_features)
+            train_features = feature_reduction_model.fit_transform(train_features,
+                               sampled_train_y_df.loc[sampled_train_y_df.common_index.
+                                       apply(lambda x: x in sampled_train_x_df.common_index.values)].\
+                                                                   row_class.values)
+            test_features = feature_reduction_model.transform(test_features)
     else:
-        pca_model = None
+        feature_reduction_model = None
     if post_normaliser is not None:
         if post_normaliser == 'unit':
             train_features = train_features / np.linalg.norm(train_features, axis=1).\
@@ -148,7 +158,7 @@ def pre_normalise_and_pca(sampled_train_x_df, sampled_test_x_df, n_features=50,
     sampled_test_x_df[feature_col + '_orig'] = sampled_test_x_df[feature_col]
     sampled_train_x_df[feature_col] = train_features.tolist()
     sampled_test_x_df[feature_col] = test_features.tolist()
-    return sampled_train_x_df, sampled_test_x_df, pca_model, pre_normaliser, post_normaliser
+    return sampled_train_x_df, sampled_test_x_df, feature_reduction_model, pre_normaliser, post_normaliser
 
 def filter_out_negatives(x_datapoints, rawpop_upper_bounds=None, y_datapoints=None, pop_col=POP_COL,
                          return_fns=False):
@@ -285,7 +295,7 @@ def evaluate_results(y_pred, y_truth, type='acc'):
 
 def predict_and_evaluate_dfs(clf_model, x_datapoints, y_datapoints,
                              rawpop_upper_bounds=None, normaliser=None, eval_type='f1', features_col=FEATURE_COL,
-                             return_modified_df=False):
+                             return_modified_df=False, aggregate_for_skills=False):
     """
     Wrapper for predicting and evaluating the predictions.
     :param clf_model: Classifier model
@@ -297,14 +307,26 @@ def predict_and_evaluate_dfs(clf_model, x_datapoints, y_datapoints,
     """
     y_pred = predict_results_df(clf_model, x_datapoints, y_datapoints.common_index.values, rawpop_upper_bounds,
                                 normaliser=normaliser, features_col=features_col)
-    evaluation = evaluate_results(y_pred, y_datapoints[TRUTH_COL].values, eval_type)
-    if not return_modified_df:
-        return y_pred, evaluation
-    else:
-        return y_pred, evaluation, \
-                    y_datapoints.copy().assign(pred=y_pred).loc[y_pred == 1], \
-                    y_datapoints.copy().assign(pred=y_pred).loc[y_datapoints.row_class == 1],\
-                    y_datapoints.copy().assign(pred=y_pred)
+    if not aggregate_for_skills:
+        evaluation = evaluate_results(y_pred, y_datapoints[TRUTH_COL].values, eval_type)
+        if not return_modified_df:
+            return y_pred, evaluation
+        else:
+            return y_pred, evaluation, \
+                        y_datapoints.assign(pred=y_pred).loc[y_pred == 1], \
+                        y_datapoints.assign(pred=y_pred).loc[y_datapoints.row_class == 1],\
+                        y_datapoints.assign(pred=y_pred)
+    if aggregate_for_skills:
+        result_df = y_datapoints.assign(pred=y_pred)
+        result_df = result_df[['Skills', 'row_class', 'pred']].groupby('Skills').sum().reset_index()
+        result_df['row_class'] = result_df['row_class'].apply(lambda x: 1 if x > 0 else 0)
+        result_df['pred'] = result_df['pred'].apply(lambda x: 1 if x > 0 else 0)
+        evaluation = evaluate_results(result_df.pred.values, result_df.row_class.values, eval_type)
+        return result_df.pred, evaluation, \
+               result_df.loc[result_df.pred == 1], \
+               result_df.loc[result_df.row_class == 1],\
+               result_df
+
 
 def generate_cv_folds(x_train_df, y_train_df, cv_folds=CV_FOLDS, stratified=True, random_state=1):
     """
@@ -505,7 +527,7 @@ def cross_validate_with_quantile(cv_data, period_to_df, normaliser=None, verbose
     best_c = cs[np.argmax(scores)]
     best_q = qs[np.argmax(scores)]
 
-    return best_model, best_c, best_q, best_score
+    return best_model, best_c, best_q, best_score, rawpop_upper_bound
 
 
 

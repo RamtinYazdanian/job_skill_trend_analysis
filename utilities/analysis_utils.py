@@ -2,7 +2,6 @@ import pandas as pd
 import numpy as np
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PolynomialFeatures
-from sklearn.decomposition import PCA, TruncatedSVD
 from utilities.pandas_utils import *
 from utilities.constants import *
 from utilities.params import *
@@ -70,18 +69,19 @@ def fill_in_the_blank_dates(df, method='zero', has_company=True):
 def group_time_steps_together(df, steps_to_group=3, has_company=True):
     if steps_to_group == 1:
         return df
+    dates_list = [pd.to_datetime(x) for x in df[['Date']].drop_duplicates().sort_values('Date').Date.values]
+    dates_dict = {dates_list[i]: 1 + (i // steps_to_group) for i in range(len(dates_list))}
+    min_dates = {1 + (i // steps_to_group): dates_list[i] for i in range(len(dates_list)) if i % steps_to_group == 0}
+    result_df = df.copy()
+    result_df['Date'] = result_df.Date.apply(lambda x: min_dates[dates_dict[x]])
     if has_company:
         base_cols = ['Date', 'Company']
+        totals_fixed = result_df[base_cols + ['Total']].drop_duplicates().groupby(base_cols).sum().reset_index()
+        result_df = result_df[base_cols+['Skill', 'Job Postings Raw']].groupby(base_cols+['Skill']).sum().reset_index()
+        result_df = pd.merge(result_df, totals_fixed, on=base_cols)
     else:
         base_cols = ['Date']
-    dates_df = df[base_cols].drop_duplicates().sort_values(base_cols).reset_index().drop(columns=['index'])
-    dates_df['group'] = pd.Series(list(range(dates_df.shape[0])))
-    dates_df['group'] = dates_df['group'].apply(lambda x: 1 + (x // steps_to_group))
-    print(dates_df)
-    min_dates = dates_df.groupby('group').min().reset_index()
-    result_df = pd.merge(df, dates_df, on=base_cols).drop(columns=['Date']).groupby(['group', 'Skill']).mean(). \
-        reset_index()
-    result_df = pd.merge(result_df, min_dates, on='group').drop(columns=['group'])
+        result_df = result_df.groupby(base_cols).sum().reset_index()
     return result_df
 
 def smooth_and_normalise_timeseries(df, log, normaliser=None, smooth=None, y_col='Job Postings',
@@ -387,10 +387,13 @@ def multiple_skill_pop_profiles(df, skills, pop_type, time_period=None, normalis
 def clean_nan_features(df_dict, colname='tsfresh', feature_names=None):
     dict_keys = list(df_dict.keys())
     features_matrix = np.vstack([series_to_matrix(df_dict[k][colname]) for k in dict_keys])
-    non_nan_cols = (~np.any(np.isnan(features_matrix), axis=0)) & (~np.any(np.isinf(features_matrix), axis=0))
-    features_matrix = features_matrix[:, non_nan_cols]
+    non_nan_and_nonzero_variance_cols = \
+        (~np.any(np.isnan(features_matrix), axis=0)) & (~np.any(np.isinf(features_matrix), axis=0) &
+                                                        (np.std(features_matrix, axis=0) > 0.0))
+
+    features_matrix = features_matrix[:, non_nan_and_nonzero_variance_cols]
     if feature_names is not None:
-        feature_names = [feature_names[i] for i in range(len(feature_names)) if non_nan_cols[i] == True]
+        feature_names = [feature_names[i] for i in range(len(feature_names)) if non_nan_and_nonzero_variance_cols[i] == True]
     # if n_features is not None:
     #     reduction_model = TruncatedSVD(n_components=n_features)
     #     features_matrix = reduction_model.fit_transform(features_matrix)
@@ -405,13 +408,21 @@ def clean_nan_features(df_dict, colname='tsfresh', feature_names=None):
     return df_dict, feature_names
 
 
-def compute_total_poptype_mean(df, pop_type='log'):
+def compute_total_poptype_mean(df, pop_type='log', based_on='skill'):
     """
     For each date, computes the average, among all companies, of the desired poptype of their total number of ads.
     """
-    return df[['Date', 'Company', 'Total']].drop_duplicates().drop(columns=['Company'])\
-            .groupby('Date').apply(lambda x: np.mean(x['Total'].apply(lambda y: pop_type_function(y, pop_type)))).\
-                                                            reset_index().rename(columns={0: 'Total'})
+    if based_on == 'company':
+        return df[['Date', 'Company', 'Total']].drop_duplicates().drop(columns=['Company'])\
+                .groupby('Date').apply(lambda x: np.mean(x['Total'].apply(lambda y: pop_type_function(y, pop_type)))
+                                                    ).\
+                                                                reset_index().rename(columns={0: 'Total'})
+    else:
+        return df[['Date', 'Skill', 'Job Postings Raw']].groupby(['Date', 'Skill']).\
+            apply(lambda x: np.sum(x['Job Postings Raw'].apply(lambda y: pop_type_function(y, pop_type)))).\
+                reset_index().rename(columns={0: 'Total'}).drop(columns=['Skill'])\
+                    .groupby('Date').median().\
+                        reset_index().rename(columns={0: 'Total'})
 
 def compute_total_values(df):
     return df[['Date', 'Company', 'Total']].drop_duplicates().groupby('Date').\
