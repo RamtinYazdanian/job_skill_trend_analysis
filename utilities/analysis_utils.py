@@ -5,7 +5,7 @@ from sklearn.preprocessing import PolynomialFeatures
 from utilities.pandas_utils import *
 from utilities.constants import *
 from utilities.params import *
-from tsfresh import extract_features
+from tsfresh.feature_extraction import extract_features, ComprehensiveFCParameters, MinimalFCParameters
 
 def divide_into_periods(df, cols, start_date=None, end_date=None, result_col_name='Count'):
     df = get_period_of_time(df, start_date, end_date).copy()
@@ -158,10 +158,17 @@ def linreg_jobpostings(df, y_col='Job Postings', normaliser=None, smooth='exp', 
             return np.array([result_model.coef_[0][0], result_model.coef_[1][0],
                              spike_value, result_model.intercept_[0]])
 
-def tsfresh_jobpostings(df, y_col='Job Postings', normaliser=None, smooth=None, log=True):
+def tsfresh_jobpostings(df, y_col='Job Postings', normaliser=None, smooth=None, log=True, how='full'):
     smoothed_df = smooth_and_normalise_timeseries(df, log, normaliser, smooth, y_col, return_df=True)
     smoothed_df['id_col'] = 0
-    return extract_features(smoothed_df, column_sort='Date', column_value=y_col, column_id='id_col').iloc[0].values
+    if how == 'basic':
+        features_dict = MinimalFCParameters()
+        return extract_features(smoothed_df, column_sort='Date',
+                                column_value=y_col, column_id='id_col',
+                                default_fc_parameters=features_dict).iloc[0].values
+    else:
+        return extract_features(smoothed_df, column_sort='Date',
+                                column_value=y_col, column_id='id_col').iloc[0].values
 
 
 def extract_timeseries_features(df, y_col='Job Postings', extraction_methods=FEATURES_TO_COMPUTE,
@@ -196,9 +203,15 @@ def extract_timeseries_features(df, y_col='Job Postings', extraction_methods=FEA
                                               log=current_params['log'], degree=current_params['degree'])[:-1])
         if extraction_method == 'tsfresh':
             results.append(
-                tsfresh_jobpostings(df, y_col=y_col, normaliser=normaliser, smooth=smooth, log=current_params['log']))
+                tsfresh_jobpostings(df, y_col=y_col, normaliser=normaliser,
+                                    smooth=smooth, log=current_params['log'], how='full'))
+        if extraction_method == 'tsfresh_basic':
+            results.append(
+                tsfresh_jobpostings(df, y_col=y_col, normaliser=normaliser,
+                                    smooth=smooth, log=current_params['log'], how='basic'))
         else:
-            results.append(None)
+            results.append(smooth_and_normalise_timeseries(df, current_params['log'],
+                                                           normaliser, smooth, y_col)[1].flatten())
     return results
 
 
@@ -382,6 +395,63 @@ def investigate_skill_pop_profile(df, skill, pop_type, time_period=None, normali
 def multiple_skill_pop_profiles(df, skills, pop_type, time_period=None, normaliser=None, smooth=None):
     return pd.concat([investigate_skill_pop_profile(df, skill, pop_type, time_period, normaliser, smooth)
                       for skill in skills])
+
+def remove_selected_features(log_features_df, feature_names, colname='tsfresh',
+                             types='none'):
+    features_to_keep_list = list(range(len(feature_names)))
+
+    if isinstance(types, str) and types != 'none':
+        for current_features_to_remove in types.split(','):
+            if current_features_to_remove == 'freq':
+                features_to_keep_list = [i for i in features_to_keep_list
+                                         if 'fft' not in feature_names[i]
+                                         and 'cwt' not in feature_names[i]]
+            elif current_features_to_remove == 'nonlinearity':
+                features_to_keep_list = [i for i in features_to_keep_list
+                                         if 'symmetry' not in feature_names[i]
+                                         and 'c3' not in feature_names[i]
+                                         and 'above_mean' not in feature_names[i]
+                                         and 'below_mean' not in feature_names[i]]
+            elif current_features_to_remove == 'change':
+                features_to_keep_list = [i for i in features_to_keep_list
+                                         if 'change_quantiles' not in feature_names[i]]
+            elif current_features_to_remove == 'autocorr':
+                features_to_keep_list = [i for i in features_to_keep_list
+                                         if 'autocorrelation' not in feature_names[i]
+                                         and 'ar_' not in feature_names[i]]
+            elif current_features_to_remove == 'all_but_basics':
+                features_to_keep_list = [i for i in features_to_keep_list
+                                         if feature_names[i] in BASIC_FEATURES
+                                         or ('quantile__' in feature_names[i]
+                                             and 'mass' not in feature_names[i])]
+            elif current_features_to_remove == 'basics_plus':
+                features_to_keep_list = [i for i in features_to_keep_list
+                                         if feature_names[i] in BASIC_PLUS_FEATURES
+                                         or ('quantile__' in feature_names[i]
+                                             and 'mass' not in feature_names[i])]
+            elif current_features_to_remove == 'superbasic':
+                features_to_keep_list = [i for i in features_to_keep_list
+                                         if feature_names[i] in SUPER_BASIC_FEATURES]
+            elif current_features_to_remove == 'basicplusplus':
+                features_to_keep_list = [i for i in features_to_keep_list
+                                         if feature_names[i] in BASIC_PLUSPLUS_FEATURES]
+            elif current_features_to_remove == 'basictripleplus':
+                features_to_keep_list = [i for i in features_to_keep_list
+                                         if feature_names[i] in BASIC_TRIPLEPLUS_FEATURES
+                                         or ('quantile__' in feature_names[i]
+                                             and 'index' not in feature_names[i])]
+    elif isinstance(types, set):
+        features_to_keep_list = [i for i in features_to_keep_list
+                                 if feature_names[i] in types]
+
+    feature_names = [feature_names[i] for i in features_to_keep_list]
+    feature_matrices = {p: series_to_matrix(log_features_df[p][colname]) for p in log_features_df}
+    feature_matrices = {p: (feature_matrices[p])[:, features_to_keep_list] for p in feature_matrices}
+    for p in log_features_df:
+        log_features_df[p][colname] = feature_matrices[p].tolist()
+
+    return log_features_df, feature_names
+
 
 
 def clean_nan_features(df_dict, colname='tsfresh', feature_names=None):
