@@ -89,7 +89,7 @@ def reformat_y(df_y_ground_truths, time_periods=TIME_PERIODS, ref_col = Y_REFCOL
     return result_dict
 
 def create_train_test_split(x_datapoints, y_datapoints, test_proportion=0.2, class_balanced=True,
-                            based_on_year=False, random_state=1):
+                            based_on_year=False, also_based_on_skill=False, random_state=1):
     """
     Creates a training-test split which is
     :param x_datapoints: The x df
@@ -104,21 +104,45 @@ def create_train_test_split(x_datapoints, y_datapoints, test_proportion=0.2, cla
     print('Creating train/test split')
     if not based_on_year:
         if class_balanced:
-            sampled_skills_y = y_datapoints[['Skills', TRUTH_COL]].groupby('Skills').apply(lambda x:
+            sampled_test_skills = y_datapoints[['Skills', TRUTH_COL]].groupby('Skills').apply(lambda x:
                      Counter(list(x[TRUTH_COL])).most_common()[0][0]).reset_index().rename(columns={0: TRUTH_COL})
-            sampled_skills_y = sampled_skills_y.groupby(TRUTH_COL)[['Skills']].\
+            sampled_test_skills = sampled_test_skills.groupby(TRUTH_COL)[['Skills']].\
                 apply(pd.DataFrame.sample, frac=test_proportion, random_state=random_state).\
                                     reset_index()['Skills'].values
         else:
-            sampled_skills_y = y_datapoints[['Skills']].drop_duplicates()\
+            sampled_test_skills = y_datapoints[['Skills']].drop_duplicates()\
                             .sample(frac=test_proportion, random_state=random_state)['Skills'].values
 
-        sampled_test_y_df = y_datapoints.loc[y_datapoints['Skills'].apply(lambda x: x in sampled_skills_y)].\
+        sampled_test_y_df = y_datapoints.loc[y_datapoints['Skills'].apply(lambda x: x in sampled_test_skills)].\
                                                     reset_index().drop('index', axis=1).sort_values('common_index')
         print(sampled_test_y_df.common_index.sum())
     else:
         unique_periods = y_datapoints.common_key.apply(lambda x: x.split('_')[1]).sort_values().unique()
         last_period = unique_periods[-1]
+        print(last_period)
+
+        if also_based_on_skill:
+            sampled_test_skills = y_datapoints.loc[y_datapoints.common_key.apply(
+                    lambda x: x.split('_')[1] == last_period)][['common_key', TRUTH_COL]].\
+                            groupby('common_key').apply(lambda x:
+                                Counter(list(x[TRUTH_COL])).most_common()[0][0]).\
+                                    reset_index().rename(columns={0: TRUTH_COL})
+
+            sampled_test_skills = sampled_test_skills.groupby(TRUTH_COL)[['common_key']]. \
+                    apply(pd.DataFrame.sample, frac=test_proportion, random_state=random_state). \
+                        reset_index()['common_key'].values
+
+            all_the_other_skills = y_datapoints.loc[y_datapoints.common_key.apply(
+                lambda x: x.split('_')[1] != last_period)]
+            all_the_other_skills = all_the_other_skills.loc[all_the_other_skills.common_key.apply(lambda x:
+                                      x.split('_')[0]+last_period not in sampled_test_skills)].common_key.values
+
+            all_common_keys_to_keep = set(sampled_test_skills).union(set(all_the_other_skills))
+            y_datapoints = y_datapoints.copy().\
+                            loc[y_datapoints.common_key.apply(lambda x: x in all_common_keys_to_keep)]
+            x_datapoints = x_datapoints.copy().\
+                            loc[x_datapoints.common_key.apply(lambda x: x in all_common_keys_to_keep)]
+
         sampled_test_y_df = y_datapoints.loc[y_datapoints.common_key.apply(
                                     lambda x: x.split('_')[1] == last_period)].reset_index().\
                                         drop('index', axis=1).sort_values('common_index')
@@ -156,12 +180,12 @@ def pre_normalise_and_pca(sampled_train_x_df, sampled_test_x_df, sampled_train_y
 
                 train_features = feature_reduction_model.fit_transform(train_features,
                                    sampled_train_y_df.loc[sampled_train_y_df.common_index.
-                                    apply(lambda x: x in sampled_train_x_df.common_index.values)].row_class.values)
+                                     apply(lambda x: x in sampled_train_x_df.common_index.values)].row_class.values)
                 test_features = feature_reduction_model.transform(test_features)
             else:
                 train_features = feature_reduction_model.fit_transform(train_features,
-                                       sampled_train_y_df.loc[sampled_train_y_df.common_index.
-                                               apply(lambda x: x in sampled_train_x_df.common_index.values)].row_class.values)
+                               np.array(sampled_train_y_df.loc[sampled_train_y_df.common_index.
+                                 apply(lambda x: x in sampled_train_x_df.common_index.values)].row_class.values))
                 test_features = feature_reduction_model.transform(test_features)
 
                 train_features = pca_model.fit_transform(train_features)
@@ -456,7 +480,7 @@ def train_svm(x_df, y_df, c, rawpop_upper_bounds, normaliser=None, features_col=
     else:
         current_normaliser = None
     # current_model = SVC(C=c, kernel=kernel)
-    current_model = LinearSVC(C=c)
+    current_model = LinearSVC(C=c, max_iter=3000)
     current_model.fit(X_mat_train, y_vec_train)
     return current_model, current_normaliser
 
@@ -584,7 +608,8 @@ def cross_validate_with_quantile(cv_data, period_to_df, normaliser=None, verbose
 
 def normalise_pca_and_cross_validate_wrap(df_x_datapoints_with_ground_truth, df_y_all,
                           period_to_df, pca_feature_counts_list, n_selection_features=None, test_proportion=0.2,
-                          based_on_year=False, pre_pca_norms = None, pre_clf_norms = None,
+                          based_on_year=False, also_based_on_skill=False,
+                          pre_pca_norms = None, pre_clf_norms = None,
                            verbose=True, features_col='tsfresh',
                              c_list=C_LIST, quantiles=QUANTILES, model_to_use='logreg', eval_type='f1',
                                           random_state=1, common_keys_to_keep=None):
@@ -609,7 +634,7 @@ def normalise_pca_and_cross_validate_wrap(df_x_datapoints_with_ground_truth, df_
             df_y_all.common_key.apply(lambda x: x in common_keys_to_keep)
         ]
 
-    n_orig_features = len(df_x_datapoints_with_ground_truth.iloc[0][features_col])
+    n_orig_features = len(df_x_datapoints_with_ground_truth[features_col].values[0])
     if pca_feature_counts_list == []:
         pca_feature_counts_list = [n_orig_features]
     pca_feature_counts_list = [x if x <= n_orig_features else n_orig_features for x in pca_feature_counts_list]
@@ -621,7 +646,8 @@ def normalise_pca_and_cross_validate_wrap(df_x_datapoints_with_ground_truth, df_
                 class_balanced = (not based_on_year)
                 sampled_train_x_df, sampled_test_x_df, sampled_train_y_df, sampled_test_y_df = \
                     create_train_test_split(df_x_datapoints_with_ground_truth, df_y_all,
-                                            test_proportion=test_proportion, based_on_year=based_on_year,
+                                            test_proportion=test_proportion,
+                                            based_on_year=based_on_year, also_based_on_skill=also_based_on_skill,
                                             class_balanced=class_balanced, random_state=random_state)
                 current_prenorm = None
                 if pre_norm is not None:
@@ -630,7 +656,7 @@ def normalise_pca_and_cross_validate_wrap(df_x_datapoints_with_ground_truth, df_
                     pre_normalise_and_pca(sampled_train_x_df, sampled_test_x_df, sampled_train_y_df, sampled_test_y_df,
                                           n_pca_features=n_pca_features, n_selection_features=n_selection_features,
                                           pre_normaliser=current_prenorm,
-                                          post_normaliser=None, pca_first=True, feature_col=features_col)
+                                          post_normaliser=None, pca_first=False, feature_col=features_col)
 
                 cv_data = generate_cv_folds(sampled_train_x_df, sampled_train_y_df, stratified=False)
 
@@ -687,11 +713,11 @@ def normalise_pca_and_cross_validate_wrap(df_x_datapoints_with_ground_truth, df_
 
 
 def test_eval_for_wrapped_results(df_x_datapoints_with_ground_truth, df_y_all,
-        results_dict, best_index, random_state, already_has_feature_selection=True,
+                                  results_dict, best_index, random_state, already_has_feature_selection=True,
                                   n_selection_features=None, test_proportion=0.3,
-                                  based_on_year=False, verbose=False, skills_to_ignore=None,
+                                  based_on_year=False, also_based_on_skill=False, verbose=False, skills_to_ignore=None,
                                   skills_to_keep=None, skills_to_predict_zero=None,
-                                  feature_col='tsfresh'):
+                                  feature_col='tsfresh', baselines_to_test=None, pca_first=True):
     wrapped_results = results_dict[best_index]
     print(wrapped_results)
     best_model = wrapped_results[0]
@@ -706,7 +732,9 @@ def test_eval_for_wrapped_results(df_x_datapoints_with_ground_truth, df_y_all,
 
     sampled_train_x_df, sampled_test_x_df, sampled_train_y_df, sampled_test_y_df = \
         create_train_test_split(df_x_datapoints_with_ground_truth, df_y_all,
-                                test_proportion=test_proportion, based_on_year=based_on_year,
+                                test_proportion=test_proportion,
+                                based_on_year=based_on_year,
+                                also_based_on_skill=also_based_on_skill,
                                 class_balanced=class_balanced,
                                 random_state=random_state)
 
@@ -721,13 +749,13 @@ def test_eval_for_wrapped_results(df_x_datapoints_with_ground_truth, df_y_all,
             sampled_test_y_df.Skills.apply(lambda x: x not in skills_to_ignore)]
     if skills_to_keep is not None:
         sampled_train_x_df = sampled_train_x_df.loc[
-            sampled_train_x_df.Skill.apply(lambda x: x in skills_to_keep)]
+            sampled_train_x_df.common_key.apply(lambda x: x in skills_to_keep)]
         sampled_train_y_df = sampled_train_y_df.loc[
-            sampled_train_y_df.Skills.apply(lambda x: x in skills_to_keep)]
+            sampled_train_y_df.common_key.apply(lambda x: x in skills_to_keep)]
         sampled_test_x_df = sampled_test_x_df.loc[
-            sampled_test_x_df.Skill.apply(lambda x: x in skills_to_keep)]
+            sampled_test_x_df.common_key.apply(lambda x: x in skills_to_keep)]
         sampled_test_y_df = sampled_test_y_df.loc[
-            sampled_test_y_df.Skills.apply(lambda x: x in skills_to_keep)]
+            sampled_test_y_df.common_key.apply(lambda x: x in skills_to_keep)]
 
     train_features = prenormaliser.transform(series_to_matrix(sampled_train_x_df[feature_col]))
     test_features = prenormaliser.transform(series_to_matrix(sampled_test_x_df[feature_col]))
@@ -747,14 +775,21 @@ def test_eval_for_wrapped_results(df_x_datapoints_with_ground_truth, df_y_all,
         feature_reduction_model = pca_model[1]
         print(feature_reduction_model)
         pca_model = pca_model[0]
-        train_features = pca_model.transform(train_features)
-        test_features = pca_model.transform(test_features)
-
-        if feature_reduction_model is not None:
+        if pca_first or feature_reduction_model is None:
+            train_features = pca_model.transform(train_features)
+            test_features = pca_model.transform(test_features)
+            if feature_reduction_model is not None:
+                train_features = feature_reduction_model.fit_transform(train_features,
+                                   sampled_train_y_df.loc[sampled_train_y_df.common_index.
+                                   apply(lambda x: x in sampled_train_x_df.common_index.values)].row_class.values)
+                test_features = feature_reduction_model.transform(test_features)
+        else:
             train_features = feature_reduction_model.fit_transform(train_features,
                        sampled_train_y_df.loc[sampled_train_y_df.common_index.
                        apply(lambda x: x in sampled_train_x_df.common_index.values)].row_class.values)
             test_features = feature_reduction_model.transform(test_features)
+            train_features = pca_model.transform(train_features)
+            test_features = pca_model.transform(test_features)
 
     sampled_train_x_df[feature_col] = train_features.tolist()
     sampled_test_x_df[feature_col] = test_features.tolist()
@@ -867,24 +902,16 @@ def test_eval_for_wrapped_results(df_x_datapoints_with_ground_truth, df_y_all,
 
     results_to_return['train_baseline_agg'] = train_baseline_eval
 
-    if based_on_year:
-        class_based_on_last_years = pd.merge(sampled_train_y_df[['Skills', 'row_class']].groupby('Skills').sum(),
-                                             sampled_train_y_df[['Skills', 'row_class']].groupby('Skills').count(),
-                                             left_index=True, right_index=True,
-                                             suffixes=('_sum', '_count')).reset_index()
-        class_based_on_last_years['pred'] = class_based_on_last_years['row_class_sum'] / \
-                                                    class_based_on_last_years['row_class_count']
-        class_based_on_last_years['pred'] = class_based_on_last_years['pred'].apply(lambda x: x >= 0.5)
-        class_based_on_last_years = pd.merge(sampled_test_y_df,
-                                            class_based_on_last_years[['Skills', 'pred']],
-                                            on='Skills')
-        test_lastyearpred_baseline_unagg = (evaluate_results(class_based_on_last_years.pred.values,
-                               class_based_on_last_years.row_class.values,
-                               eval_type='prfs'))
-        if verbose:
-            print(test_lastyearpred_baseline_unagg)
-        results_to_return['test_lastyearpred_baseline_unagg'] = test_lastyearpred_baseline_unagg
-
+    if baselines_to_test is not None:
+        for baseline_name in baselines_to_test:
+            current_baseline_positives = list(baselines_to_test[baseline_name])
+            current_test_y = sampled_test_y_df.copy()
+            if '_' in current_baseline_positives[0] and '-' in current_baseline_positives[0]:
+                current_test_y['pred'] = current_test_y.common_key.apply(lambda x: x in current_baseline_positives)
+            else:
+                current_test_y['pred'] = current_test_y.Skills.apply(lambda x: x in current_baseline_positives)
+            results_to_return[baseline_name] = \
+                evaluate_results(current_test_y.pred.values, current_test_y.row_class.values, eval_type='prfs')
 
     return results_to_return
 
