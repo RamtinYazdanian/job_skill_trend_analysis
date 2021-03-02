@@ -717,7 +717,8 @@ def test_eval_for_wrapped_results(df_x_datapoints_with_ground_truth, df_y_all,
                                   n_selection_features=None, test_proportion=0.3,
                                   based_on_year=False, also_based_on_skill=False, verbose=False, skills_to_ignore=None,
                                   skills_to_keep=None, skills_to_predict_zero=None,
-                                  feature_col='tsfresh', baselines_to_test=None, pca_first=True):
+                                  feature_col='tsfresh', baselines_to_test=None, pca_first=True,
+                                  return_pred_df=False):
     wrapped_results = results_dict[best_index]
     print(wrapped_results)
     best_model = wrapped_results[0]
@@ -810,6 +811,7 @@ def test_eval_for_wrapped_results(df_x_datapoints_with_ground_truth, df_y_all,
     if skills_to_predict_zero is not None:
         test_all_pred['pred'] = test_all_pred.apply(lambda x: x['pred']
                             if x['Skills'] not in skills_to_predict_zero else 0, axis=1)
+        test_y_eval = evaluate_results(test_y_pred.pred.values, test_y_pred.row_class.values, 'prfs')
 
     results_to_return['test_unagg'] = test_y_eval
     if verbose:
@@ -827,7 +829,7 @@ def test_eval_for_wrapped_results(df_x_datapoints_with_ground_truth, df_y_all,
     if verbose:
         print('**********Test set, aggregated')
 
-    test_y_pred, test_y_eval, test_pred_positive_df, test_actual_positive_df, test_all_pred = \
+    test_y_pred_agg, test_y_eval, test_pred_positive_df, test_actual_positive_df, test_all_pred_agg = \
         predict_and_evaluate_dfs(best_model[0], sampled_test_x_df, sampled_test_y_df,
                                  rawpop_upper_bounds=rawpop_upper_bound_dict,
                                  features_col=feature_col,
@@ -835,7 +837,7 @@ def test_eval_for_wrapped_results(df_x_datapoints_with_ground_truth, df_y_all,
                                  aggregate_for_skills=True)
 
     if verbose:
-        print(test_y_pred, test_y_eval, test_pred_positive_df, test_actual_positive_df)
+        print(test_y_pred_agg, test_y_eval, test_pred_positive_df, test_actual_positive_df)
 
     results_to_return['test_agg'] = test_y_eval
 
@@ -912,8 +914,10 @@ def test_eval_for_wrapped_results(df_x_datapoints_with_ground_truth, df_y_all,
                 current_test_y['pred'] = current_test_y.Skills.apply(lambda x: x in current_baseline_positives)
             results_to_return[baseline_name] = \
                 evaluate_results(current_test_y.pred.values, current_test_y.row_class.values, eval_type='prfs')
-
-    return results_to_return
+    if not return_pred_df:
+        return results_to_return
+    else:
+        return results_to_return, test_all_pred
 
 
 def interpret_model(clf_model, feature_names, feature_scores=None,
