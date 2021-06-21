@@ -2,12 +2,13 @@ from utilities.analysis_utils import *
 from utilities.common_utils import *
 from utilities.pandas_utils import *
 from sklearn.metrics import precision_recall_fscore_support, f1_score, confusion_matrix, \
-                    precision_score, accuracy_score, recall_score
-from sklearn.linear_model import LogisticRegression
+                    precision_score, accuracy_score, recall_score, mean_squared_error
+from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.preprocessing import StandardScaler, RobustScaler
 from sklearn.svm import SVC, LinearSVC
 from sklearn.decomposition import PCA, TruncatedSVD
-from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif
+from sklearn.feature_selection import SelectKBest, f_classif, f_regression, \
+    mutual_info_classif, mutual_info_regression
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.model_selection import StratifiedKFold, KFold
 from sklearn.base import clone as sklearn_clone
@@ -40,8 +41,10 @@ def skills_to_indices(dfs_x, dfs_y, x_refcol=X_REFCOL, y_refcol=Y_REFCOL):
     # The sorting of both dataframes by their reference column ensures that for the different pop methods,
     # we get the exact same indices. It matters when it comes to the train/test splits and cross-validation
     # folds, since we generate the indices based on the initial order of the dataframe.
-    df_x_all = pd.concat([dfs_x[k].reset_index().assign(time_period=k).
-                         assign(common_key=dfs_x[k].reset_index()[x_refcol].apply(lambda name: name + '_' + k))
+    dfs_x = {k: dfs_x[k].reset_index().sort_values(x_refcol) for k in dfs_x}
+    dfs_y = {k: dfs_y[k].reset_index().sort_values(y_refcol) for k in dfs_y}
+    df_x_all = pd.concat([dfs_x[k].assign(time_period=k).
+                         assign(common_key=dfs_x[k][x_refcol].apply(lambda name: name + '_' + k))
                           for k in dfs_x], axis=0).reset_index().drop(columns=['index']).sort_values('common_key')
     print(df_x_all.head())
     df_y_all = pd.concat([dfs_y[k].assign(common_key=dfs_y[k][y_refcol].apply(lambda name: name + '_' + k))
@@ -50,6 +53,7 @@ def skills_to_indices(dfs_x, dfs_y, x_refcol=X_REFCOL, y_refcol=Y_REFCOL):
     datapoints_with_ground_truth_indices = invert_dict(dict(enumerate(df_y_all.common_key.values.tolist())))
     #print(datapoints_with_ground_truth_indices)
     datapoints_no_ground_truth_indices = [x for x in df_x_all.common_key.values if x not in df_y_all.common_key.values]
+    print(datapoints_no_ground_truth_indices)
     datapoints_no_ground_truth_indices = {datapoints_no_ground_truth_indices[i]:
                                               len(datapoints_with_ground_truth_indices)+i
                                                     for i in range(len(datapoints_no_ground_truth_indices))}
@@ -68,6 +72,15 @@ def skills_to_indices(dfs_x, dfs_y, x_refcol=X_REFCOL, y_refcol=Y_REFCOL):
 
     return df_x_datapoints_with_ground_truth, df_y_all, df_x_all, datapoints_all_indices
 
+
+def continuous_reformat_y(aficf_scores, time_periods=TIME_PERIODS, skill_col='TagName', ref_col='score_diff'):
+    result_dict = dict()
+    for time_period_key in time_periods:
+        new_df = aficf_scores.loc[aficf_scores.year == time_period_key.split('-')[1],
+                                  [ref_col, skill_col]].copy()
+        new_df = new_df.rename(columns={skill_col: Y_REFCOL, ref_col: TRUTH_COL})
+        result_dict[time_period_key] = new_df
+    return result_dict
 
 def reformat_y(df_y_ground_truths, time_periods=TIME_PERIODS, ref_col = Y_REFCOL):
     """
@@ -89,7 +102,7 @@ def reformat_y(df_y_ground_truths, time_periods=TIME_PERIODS, ref_col = Y_REFCOL
     return result_dict
 
 def create_train_test_split(x_datapoints, y_datapoints, test_proportion=0.2, class_balanced=True,
-                            based_on_year=False, also_based_on_skill=False, random_state=1):
+                            based_on_year=False, also_based_on_skill=False, random_state=1, truth_col=TRUTH_COL):
     """
     Creates a training-test split which is
     :param x_datapoints: The x df
@@ -101,12 +114,17 @@ def create_train_test_split(x_datapoints, y_datapoints, test_proportion=0.2, cla
 
     RUN ONCE per pop method (all the different methods and hyperparameters should have the exact same split).
     """
+
+    print('BEFORE THE SPLIT:')
+    print(y_datapoints.common_index.sum())
+    print(y_datapoints.shape)
+
     print('Creating train/test split')
     if not based_on_year:
         if class_balanced:
-            sampled_test_skills = y_datapoints[['Skills', TRUTH_COL]].groupby('Skills').apply(lambda x:
-                     Counter(list(x[TRUTH_COL])).most_common()[0][0]).reset_index().rename(columns={0: TRUTH_COL})
-            sampled_test_skills = sampled_test_skills.groupby(TRUTH_COL)[['Skills']].\
+            sampled_test_skills = y_datapoints[['Skills', truth_col]].groupby('Skills').apply(lambda x:
+                     Counter(list(x[truth_col])).most_common()[0][0]).reset_index().rename(columns={0: truth_col})
+            sampled_test_skills = sampled_test_skills.groupby(truth_col)[['Skills']].\
                 apply(pd.DataFrame.sample, frac=test_proportion, random_state=random_state).\
                                     reset_index()['Skills'].values
         else:
@@ -123,19 +141,16 @@ def create_train_test_split(x_datapoints, y_datapoints, test_proportion=0.2, cla
 
         if also_based_on_skill:
             sampled_test_skills = y_datapoints.loc[y_datapoints.common_key.apply(
-                    lambda x: x.split('_')[1] == last_period)][['common_key', TRUTH_COL]].\
-                            groupby('common_key').apply(lambda x:
-                                Counter(list(x[TRUTH_COL])).most_common()[0][0]).\
-                                    reset_index().rename(columns={0: TRUTH_COL})
+                    lambda x: x.split('_')[1] == last_period)][['common_key', truth_col]]
 
-            sampled_test_skills = sampled_test_skills.groupby(TRUTH_COL)[['common_key']]. \
+            sampled_test_skills = sampled_test_skills.groupby(truth_col)[['common_key']]. \
                     apply(pd.DataFrame.sample, frac=test_proportion, random_state=random_state). \
-                        reset_index()['common_key'].values
+                        reset_index()['common_key'].values.tolist()
 
             all_the_other_skills = y_datapoints.loc[y_datapoints.common_key.apply(
                 lambda x: x.split('_')[1] != last_period)]
             all_the_other_skills = all_the_other_skills.loc[all_the_other_skills.common_key.apply(lambda x:
-                                      x.split('_')[0]+last_period not in sampled_test_skills)].common_key.values
+                                  x.split('_')[0]+last_period not in sampled_test_skills)].common_key.values.tolist()
 
             all_common_keys_to_keep = set(sampled_test_skills).union(set(all_the_other_skills))
             y_datapoints = y_datapoints.copy().\
@@ -146,6 +161,12 @@ def create_train_test_split(x_datapoints, y_datapoints, test_proportion=0.2, cla
         sampled_test_y_df = y_datapoints.loc[y_datapoints.common_key.apply(
                                     lambda x: x.split('_')[1] == last_period)].reset_index().\
                                         drop('index', axis=1).sort_values('common_index')
+        print('Data on sampled test Y')
+        print(sampled_test_y_df.common_index.sum())
+        print(sampled_test_y_df.shape)
+        print('Data on the whole thing')
+        print(y_datapoints.common_index.sum())
+        print(y_datapoints.shape)
 
 
     sampled_train_y_df = y_datapoints.loc[y_datapoints.common_index.apply(lambda x:
@@ -162,7 +183,7 @@ def create_train_test_split(x_datapoints, y_datapoints, test_proportion=0.2, cla
     return sampled_train_x_df, sampled_test_x_df, sampled_train_y_df, sampled_test_y_df
 
 def pre_normalise_and_pca(sampled_train_x_df, sampled_test_x_df, sampled_train_y_df, sampled_test_y_df,
-                          n_pca_features=50, n_selection_features=50,
+                          n_pca_features=50, n_selection_features=None, is_clf=True,
                           pre_normaliser=None, post_normaliser=None, feature_col='tsfresh', pca_first=True):
 
     train_features = series_to_matrix(sampled_train_x_df[feature_col])
@@ -173,19 +194,24 @@ def pre_normalise_and_pca(sampled_train_x_df, sampled_test_x_df, sampled_train_y
     if n_pca_features is not None:
         pca_model = PCA(n_components=n_pca_features)
         if n_selection_features is not None:
-            feature_reduction_model = SelectKBest(score_func=mutual_info_classif, k=n_selection_features)
+            if is_clf:
+                feature_reduction_model = SelectKBest(score_func=f_classif, k=n_selection_features)
+            else:
+                feature_reduction_model = SelectKBest(score_func=f_regression, k=n_selection_features)
             if pca_first:
                 train_features = pca_model.fit_transform(train_features)
                 test_features = pca_model.transform(test_features)
 
                 train_features = feature_reduction_model.fit_transform(train_features,
                                    sampled_train_y_df.loc[sampled_train_y_df.common_index.
-                                     apply(lambda x: x in sampled_train_x_df.common_index.values)].row_class.values)
+                                     apply(lambda x: x in sampled_train_x_df.common_index.values)].
+                                                                       row_class.values.tolist())
                 test_features = feature_reduction_model.transform(test_features)
             else:
                 train_features = feature_reduction_model.fit_transform(train_features,
                                np.array(sampled_train_y_df.loc[sampled_train_y_df.common_index.
-                                 apply(lambda x: x in sampled_train_x_df.common_index.values)].row_class.values))
+                                 apply(lambda x: x in sampled_train_x_df.common_index.values)].
+                                        row_class.values.tolist()))
                 test_features = feature_reduction_model.transform(test_features)
 
                 train_features = pca_model.fit_transform(train_features)
@@ -197,7 +223,10 @@ def pre_normalise_and_pca(sampled_train_x_df, sampled_test_x_df, sampled_train_y
     else:
         pca_model = None
         if n_selection_features is not None:
-            feature_reduction_model = SelectKBest(score_func=mutual_info_classif, k=n_selection_features)
+            if is_clf:
+                feature_reduction_model = SelectKBest(score_func=mutual_info_classif, k=n_selection_features)
+            else:
+                feature_reduction_model = SelectKBest(score_func=mutual_info_regression, k=n_selection_features)
             train_features = feature_reduction_model.fit_transform(train_features,
                                sampled_train_y_df.loc[sampled_train_y_df.common_index.
                                apply(lambda x: x in sampled_train_x_df.common_index.values)].row_class.values)
@@ -307,22 +336,29 @@ def fill_in_prediction_blanks(y_predicted, pred_indices, all_indices):
             all_current_index_pos += 1
     return np.array(y_result)
 
-def predict_results_vec(clf_model, x_mat, pred_indices=None, reference_indices=None, normaliser=None):
-
-    if normaliser is not None:
-        y_pred = clf_model.predict(normaliser.transform(x_mat))
+def predict_results_vec(clf_model, x_mat, pred_indices=None, reference_indices=None, normaliser=None,
+                        return_proba=False):
+    if not return_proba:
+        if normaliser is not None:
+            y_pred = clf_model.predict(normaliser.transform(x_mat))
+        else:
+            y_pred = clf_model.predict(np.array([np.array(x) for x in x_mat]))
     else:
-        y_pred = clf_model.predict(np.array([np.array(x) for x in x_mat]))
+        if normaliser is not None:
+            y_pred = clf_model.predict_proba(normaliser.transform(x_mat))
+        else:
+            y_pred = clf_model.predict_proba(np.array([np.array(x) for x in x_mat]))
     if pred_indices is not None and reference_indices is not None:
         y_pred = fill_in_prediction_blanks(y_pred, pred_indices, reference_indices)
+
     return y_pred
 
-def predict_results_df(clf_model, x_datapoints, y_datapoints, rawpop_upper_bounds=None, normaliser=None,
-                       features_col=FEATURE_COL):
+def predict_results_df(clf_or_reg_model, x_datapoints, y_datapoints, rawpop_upper_bounds=None, normaliser=None,
+                       features_col=FEATURE_COL, return_proba=False):
     """
     Takes a model and its input, optionally filters out the default negatives, then predicts labels for the given input
     and optionally for datapoints absent from the input, and returns the result.
-    :param clf_model: The classifier model
+    :param clf_or_reg_model: The classifier model
     :param x_datapoints: The dataframe containing the input data
     :param reference_indices: The indices for which a prediction is to be made. This argument exists because some data
     can be missing (because a skill never showed up) and these are datapoints that are to be predicted as negatives
@@ -338,7 +374,8 @@ def predict_results_df(clf_model, x_datapoints, y_datapoints, rawpop_upper_bound
     x_mat, discard, pred_indices = get_indices_and_matrices(x_datapoints, None, features_col=features_col)
 
     # print(len(pred_indices))
-    return predict_results_vec(clf_model, x_mat, pred_indices, y_datapoints.common_index.values, normaliser)
+    return predict_results_vec(clf_or_reg_model, x_mat, pred_indices, y_datapoints.common_index.values, normaliser,
+                               return_proba=return_proba)
 
 
 def evaluate_results(y_pred, y_truth, eval_type='acc'):
@@ -355,14 +392,44 @@ def evaluate_results(y_pred, y_truth, eval_type='acc'):
     elif eval_type == 'tpfpfn':
         conf_mat = confusion_matrix(y_truth, y_pred)
         return conf_mat[1,1], conf_mat[0,1], conf_mat[1,0]
+    elif eval_type == 'rmse':
+        return mean_squared_error(y_truth, y_pred, squared=False)
 
 
-def predict_and_evaluate_dfs(clf_model, x_datapoints, y_datapoints,
-                             rawpop_upper_bounds=None, normaliser=None, eval_type='f1', features_col=FEATURE_COL,
-                             return_modified_df=False, aggregate_for_skills=False):
+def predict_and_binarise_to_evaluate(clf_or_reg_model, x_datapoints, y_datapoints,
+                                         eligible_skills, rank_q,
+                                            normaliser=None, eval_type='prfs', skills_to_keep=None,
+                                                features_col=FEATURE_COL,
+                                                    return_modified_df=False):
+    x_datapoints = x_datapoints.sort_values('common_index')
+    y_datapoints = y_datapoints.sort_values('common_index')
+    y_pred = predict_results_df(clf_or_reg_model, x_datapoints, y_datapoints, None,
+                                normaliser=normaliser, features_col=features_col, return_proba=False)
+    y_datapoints = y_datapoints.assign(cont_pred=y_pred)
+    skills_predicted_positive = y_datapoints.loc[(y_datapoints.Skills.apply(lambda x: x in eligible_skills)) &
+                                     (y_datapoints.cont_pred >= y_datapoints.cont_pred.quantile(rank_q))].\
+                                                        Skills.values
+    y_datapoints['pred'] = y_datapoints.Skills.apply(lambda x: 1 if x in skills_predicted_positive else 0)
+    if skills_to_keep is not None:
+        y_datapoints = y_datapoints.loc[y_datapoints.common_key.apply(lambda x: x in skills_to_keep)]
+    y_pred = y_datapoints.pred.values
+    y_truth = y_datapoints.row_class.values
+    evaluation = evaluate_results(y_pred, y_truth, eval_type)
+    if not return_modified_df:
+        return y_pred, evaluation
+    else:
+        return y_pred, evaluation, \
+               y_datapoints.loc[y_datapoints.pred == 1], \
+               y_datapoints.loc[y_datapoints.row_class == 1], \
+               y_datapoints
+
+def predict_and_evaluate_dfs(clf_or_reg_model, x_datapoints, y_datapoints,
+                             rawpop_upper_bounds=None, normaliser=None, eval_type='f1', skills_to_keep = None,
+                             features_col=FEATURE_COL,
+                             return_modified_df=False, aggregate_for_skills=False, is_bin=True):
     """
     Wrapper for predicting and evaluating the predictions.
-    :param clf_model: Classifier model
+    :param clf_or_reg_model: Classifier model
     :param x_datapoints: X dataframe
     :param y_datapoints: Y dataframe
     :param rawpop_upper_bounds: Rawpop upper bound dictionary
@@ -372,30 +439,47 @@ def predict_and_evaluate_dfs(clf_model, x_datapoints, y_datapoints,
 
     x_datapoints = x_datapoints.sort_values('common_index')
     y_datapoints = y_datapoints.sort_values('common_index')
-    y_pred = predict_results_df(clf_model, x_datapoints, y_datapoints, rawpop_upper_bounds,
-                                normaliser=normaliser, features_col=features_col)
-    if not aggregate_for_skills:
+
+    if is_bin:
+        y_pred = predict_results_df(clf_or_reg_model, x_datapoints, y_datapoints, rawpop_upper_bounds,
+                                    normaliser=normaliser, features_col=features_col, return_proba=False)
+        if skills_to_keep is not None:
+            y_df_pred = y_datapoints.assign(pred=y_pred)
+            y_df_pred = y_df_pred.loc[y_df_pred.common_key.apply(lambda x: x in skills_to_keep)]
+        else:
+            y_df_pred = y_datapoints.assign(pred=y_pred)
+        y_pred = y_df_pred.pred.values
+        y_truth = y_df_pred.row_class.values
+        if not aggregate_for_skills:
+            evaluation = evaluate_results(y_pred, y_truth, eval_type)
+            if not return_modified_df:
+                return y_pred, evaluation
+            else:
+                return y_pred, evaluation, \
+                            y_df_pred.loc[y_pred == 1], \
+                            y_df_pred.loc[y_truth == 1],\
+                            y_df_pred
+        if aggregate_for_skills:
+            result_df = y_datapoints.assign(pred=y_pred)
+            result_df = result_df[['Skills', 'row_class', 'pred']].groupby('Skills').sum().reset_index()
+            result_df['row_class'] = result_df['row_class'].apply(lambda x: 1 if x > 0 else 0)
+            result_df['pred'] = result_df['pred'].apply(lambda x: 1 if x > 0 else 0)
+            evaluation = evaluate_results(result_df.pred.values, result_df.row_class.values, eval_type)
+            if not return_modified_df:
+                return result_df.pred, evaluation
+            else:
+                return result_df.pred, evaluation, \
+                   result_df.loc[result_df.pred == 1], \
+                   result_df.loc[result_df.row_class == 1],\
+                   result_df
+    else:
+        y_pred = predict_results_df(clf_or_reg_model, x_datapoints, y_datapoints, None,
+                                    normaliser=normaliser, features_col=features_col, return_proba=False)
         evaluation = evaluate_results(y_pred, y_datapoints[TRUTH_COL].values, eval_type)
         if not return_modified_df:
             return y_pred, evaluation
         else:
-            return y_pred, evaluation, \
-                        y_datapoints.assign(pred=y_pred).loc[y_pred == 1], \
-                        y_datapoints.assign(pred=y_pred).loc[y_datapoints.row_class == 1],\
-                        y_datapoints.assign(pred=y_pred)
-    if aggregate_for_skills:
-        result_df = y_datapoints.assign(pred=y_pred)
-        result_df = result_df[['Skills', 'row_class', 'pred']].groupby('Skills').sum().reset_index()
-        result_df['row_class'] = result_df['row_class'].apply(lambda x: 1 if x > 0 else 0)
-        result_df['pred'] = result_df['pred'].apply(lambda x: 1 if x > 0 else 0)
-        evaluation = evaluate_results(result_df.pred.values, result_df.row_class.values, eval_type)
-        if not return_modified_df:
-            return result_df.pred, evaluation
-        else:
-            return result_df.pred, evaluation, \
-               result_df.loc[result_df.pred == 1], \
-               result_df.loc[result_df.row_class == 1],\
-               result_df
+            return y_pred, evaluation, y_datapoints.assign(pred=y_pred)
 
 
 def generate_cv_folds(x_train_df, y_train_df, cv_folds=CV_FOLDS, stratified=True, random_state=1):
@@ -457,6 +541,30 @@ def train_logreg_model(x_df, y_df, c, rawpop_upper_bounds, normaliser=None, feat
     current_model.fit(X_mat_train, y_vec_train)
     return current_model, current_normaliser
 
+def train_linreg(x_df, y_df, c, normaliser=None, features_col=FEATURE_COL):
+    """
+    Trains a linear regression model (for continuous ground truth)
+    with the given hyperparameter and rawpop upper bounds using the data in the
+    two given dataframes (x and y).
+    :param x_df: The x df
+    :param y_df: The y df
+    :param c: The regularisation hyperparameter
+    :param normaliser: The normaliser, can be None.
+    :return: The trained model
+    """
+    # print()
+
+    X_mat_train, y_vec_train, pred_indices_train = get_indices_and_matrices(x_df, y_df,
+                                                                            features_col=features_col)
+    if normaliser is not None:
+        current_normaliser = sklearn_clone(normaliser)
+        X_mat_train = current_normaliser.fit_transform(X_mat_train)
+    else:
+        current_normaliser = None
+    current_model = Ridge(alpha=c)
+    current_model.fit(X_mat_train, y_vec_train)
+    return current_model, current_normaliser
+
 def train_svm(x_df, y_df, c, rawpop_upper_bounds, normaliser=None, features_col=FEATURE_COL, kernel='linear'):
     """
     Trains a logistic regression model with the given hyperparameter and rawpop upper bounds using the data in the
@@ -514,7 +622,7 @@ def train_decision_tree(x_df, y_df, c, rawpop_upper_bounds, normaliser=None, fea
 
 def cross_validate_model(cv_data, rawpop_upper_bounds, c_list,
                          normaliser=None, verbose=True, features_col=FEATURE_COL, model_to_use='logreg',
-                         eval_type='f1', aggregated_skills=False):
+                         eval_type='f1', aggregated_skills=False, is_bin=True):
     """
 
     :param cv_data: Cross-validation data, consisting of a list of tuples of tuples,
@@ -545,10 +653,17 @@ def cross_validate_model(cv_data, rawpop_upper_bounds, c_list,
                 current_model, current_normaliser = train_svm(current_x_df_train, current_y_df_train, c,
                                                               rawpop_upper_bounds, normaliser=normaliser,
                                                               features_col=features_col)
+            elif model_to_use == 'linreg':
+                current_model, current_normaliser = train_linreg(current_x_df_train, current_y_df_train, c,
+                                                              normaliser=normaliser,
+                                                              features_col=features_col)
             current_y_pred, current_scoring_measure = \
                                 predict_and_evaluate_dfs(current_model, current_x_df_test, current_y_df_test,
                                      rawpop_upper_bounds, current_normaliser, features_col=features_col,
-                                                         eval_type=eval_type, aggregate_for_skills=aggregated_skills)
+                                             eval_type=eval_type, aggregate_for_skills=aggregated_skills,
+                                                 is_bin=is_bin)
+
+            # TODO write train_linreg, add rmse evaluation to evaluate_results
             # print('Next')
             f1_score_values.append(current_scoring_measure)
         averaged_score = sum(f1_score_values)/CV_FOLDS
@@ -557,6 +672,8 @@ def cross_validate_model(cv_data, rawpop_upper_bounds, c_list,
         scores.append(averaged_score)
 
     scores = np.array(scores)
+    if eval_type == 'rmse':
+        scores = -scores
     best_score = np.max(scores)
     best_c = c_list[np.argmax(scores)]
     # To get the best model trained on *all* the training data (i.e. train + validation), we concatenate the contents
@@ -573,11 +690,15 @@ def cross_validate_model(cv_data, rawpop_upper_bounds, c_list,
         best_model = train_svm(pd.concat([cv_data[0][0][0], cv_data[0][1][0]], axis=0),
                                pd.concat([cv_data[0][0][1], cv_data[0][1][1]], axis=0),
                                best_c, rawpop_upper_bounds, normaliser, features_col)
+    elif model_to_use == 'linreg':
+        best_model = train_linreg(pd.concat([cv_data[0][0][0], cv_data[0][1][0]], axis=0),
+                               pd.concat([cv_data[0][0][1], cv_data[0][1][1]], axis=0),
+                               best_c, normaliser, features_col)
     return best_model, best_c, best_score
 
 def cross_validate_with_quantile(cv_data, period_to_df, normaliser=None, verbose=True, features_col=FEATURE_COL,
                                  c_list=C_LIST, quantiles=QUANTILES, model_to_use='logreg', eval_type='f1',
-                                 aggregated_skills=False):
+                                 aggregated_skills=False, is_bin=True):
     scores = list()
     models = list()
     cs = list()
@@ -592,12 +713,16 @@ def cross_validate_with_quantile(cv_data, period_to_df, normaliser=None, verbose
                                         cross_validate_model(cv_data, rawpop_upper_bound, normaliser=normaliser,
                                                  features_col=features_col, c_list=c_list, model_to_use=model_to_use,
                                                      eval_type=eval_type, verbose=verbose,
-                                                             aggregated_skills=aggregated_skills)
+                                                             aggregated_skills=aggregated_skills,
+                                                                is_bin=is_bin)
         rawpop_ubs.append(rawpop_upper_bound)
         scores.append(current_best_score)
         models.append(current_best_model)
         cs.append(current_best_c)
         qs.append(q)
+    scores = np.array(scores)
+    if eval_type == 'rmse':
+        scores = -scores
     best_score = np.max(scores)
     best_model = models[np.argmax(scores)]
     best_c = cs[np.argmax(scores)]
@@ -610,9 +735,9 @@ def normalise_pca_and_cross_validate_wrap(df_x_datapoints_with_ground_truth, df_
                           period_to_df, pca_feature_counts_list, n_selection_features=None, test_proportion=0.2,
                           based_on_year=False, also_based_on_skill=False,
                           pre_pca_norms = None, pre_clf_norms = None,
-                           verbose=True, features_col='tsfresh',
-                             c_list=C_LIST, quantiles=QUANTILES, model_to_use='logreg', eval_type='f1',
-                                          random_state=1, common_keys_to_keep=None):
+                          verbose=True, features_col='tsfresh',
+                          c_list=C_LIST, quantiles=QUANTILES, model_to_use='logreg', eval_type='f1',
+                          random_state=1, common_keys_to_keep=None, is_bin=True):
 
     print('Random state: ' + str(random_state))
 
@@ -626,6 +751,12 @@ def normalise_pca_and_cross_validate_wrap(df_x_datapoints_with_ground_truth, df_
     train_list = list()
     test_list = list()
 
+    if not is_bin:
+        eval_type = 'rmse'
+        output_eval_type = 'rmse'
+    else:
+        output_eval_type = 'prfs'
+
     if common_keys_to_keep is not None:
         df_x_datapoints_with_ground_truth = df_x_datapoints_with_ground_truth.loc[
             df_x_datapoints_with_ground_truth.common_key.apply(lambda x: x in common_keys_to_keep)
@@ -635,57 +766,65 @@ def normalise_pca_and_cross_validate_wrap(df_x_datapoints_with_ground_truth, df_
         ]
 
     n_orig_features = len(df_x_datapoints_with_ground_truth[features_col].values[0])
-    if pca_feature_counts_list == []:
+    if pca_feature_counts_list is None or pca_feature_counts_list == []:
         pca_feature_counts_list = [n_orig_features]
+    if n_selection_features is None or n_selection_features == []:
+        n_selection_features = [n_orig_features]
     pca_feature_counts_list = [x if x <= n_orig_features else n_orig_features for x in pca_feature_counts_list]
     pca_feature_counts_list = sorted(list(set(pca_feature_counts_list)))
 
     for pre_norm in pre_pca_norms:
         for post_norm in pre_clf_norms:
-            for n_pca_features in pca_feature_counts_list:
-                class_balanced = (not based_on_year)
-                sampled_train_x_df, sampled_test_x_df, sampled_train_y_df, sampled_test_y_df = \
-                    create_train_test_split(df_x_datapoints_with_ground_truth, df_y_all,
-                                            test_proportion=test_proportion,
-                                            based_on_year=based_on_year, also_based_on_skill=also_based_on_skill,
-                                            class_balanced=class_balanced, random_state=random_state)
-                current_prenorm = None
-                if pre_norm is not None:
-                    current_prenorm = sklearn_clone(pre_norm)
-                sampled_train_x_df, sampled_test_x_df, pca_model, pre_normaliser, throwaway, feature_selection_model = \
-                    pre_normalise_and_pca(sampled_train_x_df, sampled_test_x_df, sampled_train_y_df, sampled_test_y_df,
-                                          n_pca_features=n_pca_features, n_selection_features=n_selection_features,
-                                          pre_normaliser=current_prenorm,
-                                          post_normaliser=None, pca_first=False, feature_col=features_col)
+            for n_features_chosen in n_selection_features:
+                for n_pca_features in pca_feature_counts_list:
+                    class_balanced = (not based_on_year) and is_bin
+                    truth_col = TRUTH_COL if is_bin else AUX_TRUTH_COL
+                    sampled_train_x_df, sampled_test_x_df, sampled_train_y_df, sampled_test_y_df = \
+                        create_train_test_split(df_x_datapoints_with_ground_truth, df_y_all,
+                                                test_proportion=test_proportion,
+                                                based_on_year=based_on_year, also_based_on_skill=also_based_on_skill,
+                                                class_balanced=class_balanced,
+                                                random_state=random_state, truth_col=truth_col)
+                    current_prenorm = None
+                    if pre_norm is not None:
+                        current_prenorm = sklearn_clone(pre_norm)
+                    sampled_train_x_df, sampled_test_x_df, pca_model, pre_normaliser, throwaway, feature_selection_model = \
+                        pre_normalise_and_pca(sampled_train_x_df, sampled_test_x_df, sampled_train_y_df, sampled_test_y_df,
+                                              n_pca_features=n_pca_features, n_selection_features=n_features_chosen,
+                                              pre_normaliser=current_prenorm, is_clf=is_bin,
+                                              post_normaliser=None, pca_first=False, feature_col=features_col)
 
-                cv_data = generate_cv_folds(sampled_train_x_df, sampled_train_y_df, stratified=False)
+                    cv_data = generate_cv_folds(sampled_train_x_df, sampled_train_y_df, stratified=False)
 
-                normaliser = None
-                if post_norm is not None:
-                    normaliser = sklearn_clone(post_norm)
+                    normaliser = None
+                    if post_norm is not None:
+                        normaliser = sklearn_clone(post_norm)
 
-                current_model, current_c, current_q, current_score, current_rawpop_ub = \
-                    cross_validate_with_quantile(cv_data, period_to_df, normaliser=normaliser,
+                    current_model, current_c, current_q, current_score, current_rawpop_ub = \
+                        cross_validate_with_quantile(cv_data, period_to_df, normaliser=normaliser,
                                      verbose=verbose, features_col=features_col, c_list=c_list, quantiles=quantiles,
-                                                 model_to_use=model_to_use, eval_type=eval_type)
+                                             model_to_use=model_to_use, eval_type=eval_type, is_bin=is_bin)
 
-                print('Model with: ')
-                print('Pre-norm:')
-                print(pre_norm)
-                print('Post-norm:')
-                print(post_norm)
-                print('Results: ' + eval_type + ' = ' + str(current_score))
+                    print('Model with: ')
+                    print('Pre-norm:')
+                    print(pre_norm)
+                    print('Post-norm:')
+                    print(post_norm)
+                    print('Results: ' + eval_type + ' = ' + str(current_score))
 
-                pre_norm_list.append(pre_normaliser)
-                pcas_list.append([pca_model, feature_selection_model])
-                rawpop_ubs.append(current_rawpop_ub)
-                scores.append(current_score)
-                models.append(current_model)
-                cs.append(current_c)
-                qs.append(current_q)
-                train_list.append((sampled_train_x_df, sampled_train_y_df))
-                test_list.append((sampled_test_x_df, sampled_test_y_df))
+                    pre_norm_list.append(pre_normaliser)
+                    pcas_list.append([pca_model, feature_selection_model])
+                    rawpop_ubs.append(current_rawpop_ub)
+                    scores.append(current_score)
+                    models.append(current_model)
+                    cs.append(current_c)
+                    qs.append(current_q)
+                    train_list.append((sampled_train_x_df, sampled_train_y_df))
+                    test_list.append((sampled_test_x_df, sampled_test_y_df))
 
+    scores = np.array(scores)
+    if eval_type == 'rmse':
+        scores = -scores
     best_index = np.argmax(scores)
     print('**************** Best: ')
     print('Model with: ')
@@ -694,18 +833,18 @@ def normalise_pca_and_cross_validate_wrap(df_x_datapoints_with_ground_truth, df_
     print('Post-norm:')
     print(models[best_index][1])
     print('PCA model:')
-    print(pcas_list[best_index][0])
+    print(pcas_list[best_index])
     print('Results: ' + eval_type + ' = ' + str(scores[best_index]))
     print('Evaluation on train/test: ')
     print('Test: ')
     print(predict_and_evaluate_dfs(models[best_index][0], test_list[best_index][0], test_list[best_index][1],
-                                   rawpop_ubs[best_index], models[best_index][1], eval_type='prfs',
-                                   features_col=features_col,
+                                   rawpop_ubs[best_index], models[best_index][1], eval_type=output_eval_type,
+                                   features_col=features_col, is_bin=is_bin,
                                    return_modified_df=True, aggregate_for_skills=False))
     print('Train: ')
     print(predict_and_evaluate_dfs(models[best_index][0], train_list[best_index][0], train_list[best_index][1],
-                                    rawpop_ubs[best_index], models[best_index][1], eval_type='prfs',
-                                            features_col=features_col,
+                                    rawpop_ubs[best_index], models[best_index][1], eval_type=output_eval_type,
+                                            features_col=features_col, is_bin=is_bin,
                                                     return_modified_df=True, aggregate_for_skills=False))
     print('------------------------------------')
     return {i: (models[i], cs[i], qs[i], scores[i], rawpop_ubs[i], pre_norm_list[i], pcas_list[i])
@@ -718,7 +857,8 @@ def test_eval_for_wrapped_results(df_x_datapoints_with_ground_truth, df_y_all,
                                   based_on_year=False, also_based_on_skill=False, verbose=False, skills_to_ignore=None,
                                   skills_to_keep=None, skills_to_predict_zero=None,
                                   feature_col='tsfresh', baselines_to_test=None, pca_first=True,
-                                  return_pred_df=False):
+                                  return_pred_df=False, binarisation_tools=None,
+                                  is_binary=False, do_agg_eval=False, eval_type='prfs'):
     wrapped_results = results_dict[best_index]
     print(wrapped_results)
     best_model = wrapped_results[0]
@@ -731,13 +871,16 @@ def test_eval_for_wrapped_results(df_x_datapoints_with_ground_truth, df_y_all,
     print(class_balanced)
     print(best_index)
 
+
+    truth_col = TRUTH_COL if is_binary else AUX_TRUTH_COL
     sampled_train_x_df, sampled_test_x_df, sampled_train_y_df, sampled_test_y_df = \
         create_train_test_split(df_x_datapoints_with_ground_truth, df_y_all,
                                 test_proportion=test_proportion,
                                 based_on_year=based_on_year,
                                 also_based_on_skill=also_based_on_skill,
                                 class_balanced=class_balanced,
-                                random_state=random_state)
+                                random_state=random_state, truth_col=truth_col)
+
 
     if skills_to_ignore is not None:
         sampled_train_x_df = sampled_train_x_df.loc[
@@ -748,15 +891,7 @@ def test_eval_for_wrapped_results(df_x_datapoints_with_ground_truth, df_y_all,
             sampled_test_x_df.Skill.apply(lambda x: x not in skills_to_ignore)]
         sampled_test_y_df = sampled_test_y_df.loc[
             sampled_test_y_df.Skills.apply(lambda x: x not in skills_to_ignore)]
-    if skills_to_keep is not None:
-        sampled_train_x_df = sampled_train_x_df.loc[
-            sampled_train_x_df.common_key.apply(lambda x: x in skills_to_keep)]
-        sampled_train_y_df = sampled_train_y_df.loc[
-            sampled_train_y_df.common_key.apply(lambda x: x in skills_to_keep)]
-        sampled_test_x_df = sampled_test_x_df.loc[
-            sampled_test_x_df.common_key.apply(lambda x: x in skills_to_keep)]
-        sampled_test_y_df = sampled_test_y_df.loc[
-            sampled_test_y_df.common_key.apply(lambda x: x in skills_to_keep)]
+
 
     train_features = prenormaliser.transform(series_to_matrix(sampled_train_x_df[feature_col]))
     test_features = prenormaliser.transform(series_to_matrix(sampled_test_x_df[feature_col]))
@@ -780,14 +915,10 @@ def test_eval_for_wrapped_results(df_x_datapoints_with_ground_truth, df_y_all,
             train_features = pca_model.transform(train_features)
             test_features = pca_model.transform(test_features)
             if feature_reduction_model is not None:
-                train_features = feature_reduction_model.fit_transform(train_features,
-                                   sampled_train_y_df.loc[sampled_train_y_df.common_index.
-                                   apply(lambda x: x in sampled_train_x_df.common_index.values)].row_class.values)
+                train_features = feature_reduction_model.transform(train_features)
                 test_features = feature_reduction_model.transform(test_features)
         else:
-            train_features = feature_reduction_model.fit_transform(train_features,
-                       sampled_train_y_df.loc[sampled_train_y_df.common_index.
-                       apply(lambda x: x in sampled_train_x_df.common_index.values)].row_class.values)
+            train_features = feature_reduction_model.transform(train_features)
             test_features = feature_reduction_model.transform(test_features)
             train_features = pca_model.transform(train_features)
             test_features = pca_model.transform(test_features)
@@ -797,15 +928,45 @@ def test_eval_for_wrapped_results(df_x_datapoints_with_ground_truth, df_y_all,
 
     results_to_return = dict()
 
+    if binarisation_tools is not None:
+        binary_gt = binarisation_tools[0]
+        sampled_test_y_df = sampled_test_y_df.copy()
+        sampled_train_y_df = sampled_train_y_df.copy()
+        sampled_test_y_df['row_class'] = sampled_test_y_df.\
+                            Skills.apply(lambda x: 1 if x in binary_gt[1] else 0)
+
+        sampled_train_y_df['row_class'] = sampled_train_y_df.\
+                            Skills.apply(lambda x: 1 if x in binary_gt[0] else 0)
+        eligible_skills = binarisation_tools[1]
+        rank_quantile = binarisation_tools[2]
+        print('Yes binarisation')
+        print(sampled_test_y_df.loc[sampled_test_y_df['row_class'] == 1].common_index.sum())
+        print(sampled_test_y_df.loc[sampled_test_y_df['row_class'] == 1].Skills.values.tolist())
+    else:
+        print('No binarisation')
+        print(sampled_test_y_df.loc[sampled_test_y_df['row_class'] == 1].common_index.sum())
+        print(sampled_test_y_df.loc[sampled_test_y_df['row_class'] == 1].Skills.values.tolist())
+        binary_gt = None
+        eligible_skills = None
+        rank_quantile = None
+
     print('Common Index Sum: ')
     print(sampled_test_y_df.common_index.sum())
 
     print('**********Test set, not aggregated')
-    test_y_pred, test_y_eval, test_pred_positive_df, test_actual_positive_df, test_all_pred = \
-        predict_and_evaluate_dfs(best_model[0], sampled_test_x_df, sampled_test_y_df,
-                                 rawpop_upper_bounds=rawpop_upper_bound_dict,
+    if rank_quantile is None:
+        test_y_pred, test_y_eval, test_pred_positive_df, test_actual_positive_df, test_all_pred = \
+            predict_and_evaluate_dfs(best_model[0], sampled_test_x_df, sampled_test_y_df,
+                                 rawpop_upper_bounds=rawpop_upper_bound_dict, skills_to_keep=skills_to_keep,
                                  features_col=feature_col,
-                                 normaliser=best_model[1], eval_type='prfs', return_modified_df=True)
+                                 normaliser=best_model[1], eval_type=eval_type, return_modified_df=True)
+    else:
+        test_y_pred, test_y_eval, test_pred_positive_df, test_actual_positive_df, test_all_pred = \
+            predict_and_binarise_to_evaluate(best_model[0], sampled_test_x_df, sampled_test_y_df,
+                                             eligible_skills[1], rank_quantile[1], skills_to_keep=skills_to_keep,
+                                             features_col=feature_col, normaliser=best_model[1],
+                                             eval_type=eval_type, return_modified_df=True)
+
     # print(''.join([str(int(x)) for x in test_y_pred]))
 
     if skills_to_predict_zero is not None:
@@ -825,43 +986,51 @@ def test_eval_for_wrapped_results(df_x_datapoints_with_ground_truth, df_y_all,
         print(test_baseline_eval)
 
     results_to_return['test_baseline_unagg'] = test_baseline_eval
+    if do_agg_eval:
+        if verbose:
+            print('**********Test set, aggregated')
 
-    if verbose:
-        print('**********Test set, aggregated')
+        test_y_pred_agg, test_y_eval, test_pred_positive_df, test_actual_positive_df, test_all_pred_agg = \
+            predict_and_evaluate_dfs(best_model[0], sampled_test_x_df, sampled_test_y_df,
+                                     rawpop_upper_bounds=rawpop_upper_bound_dict,
+                                     features_col=feature_col,
+                                     normaliser=best_model[1], eval_type=eval_type, return_modified_df=True,
+                                     aggregate_for_skills=True)
 
-    test_y_pred_agg, test_y_eval, test_pred_positive_df, test_actual_positive_df, test_all_pred_agg = \
-        predict_and_evaluate_dfs(best_model[0], sampled_test_x_df, sampled_test_y_df,
-                                 rawpop_upper_bounds=rawpop_upper_bound_dict,
-                                 features_col=feature_col,
-                                 normaliser=best_model[1], eval_type='prfs', return_modified_df=True,
-                                 aggregate_for_skills=True)
+        if verbose:
+            print(test_y_pred_agg, test_y_eval, test_pred_positive_df, test_actual_positive_df)
 
-    if verbose:
-        print(test_y_pred_agg, test_y_eval, test_pred_positive_df, test_actual_positive_df)
+        results_to_return['test_agg'] = test_y_eval
 
-    results_to_return['test_agg'] = test_y_eval
+        if verbose:
+            print('-----------Baseline-----------')
+        agg_test_gt = sampled_test_y_df[['Skills', 'row_class']].groupby('Skills'). \
+            apply(lambda x: 1 if x['row_class'].sum() > 0 else 0) \
+            .values
+        test_baseline_eval = \
+            evaluate_results(np.array([1] * len(sampled_test_y_df.Skills.unique())), agg_test_gt
+                             , eval_type=eval_type)
+        if verbose:
+            print(test_baseline_eval)
 
-    if verbose:
-        print('-----------Baseline-----------')
-    agg_test_gt = sampled_test_y_df[['Skills', 'row_class']].groupby('Skills'). \
-        apply(lambda x: 1 if x['row_class'].sum() > 0 else 0) \
-        .values
-    test_baseline_eval = \
-        evaluate_results(np.array([1] * len(sampled_test_y_df.Skills.unique())), agg_test_gt
-                         , eval_type='prfs')
-    if verbose:
-        print(test_baseline_eval)
-
-    results_to_return['test_baseline_agg'] = test_baseline_eval
+        results_to_return['test_baseline_agg'] = test_baseline_eval
 
     if verbose:
         print('**********Training set, not aggregated')
 
-    train_y_pred, train_y_eval, train_pred_positive_df, train_actual_positive_df, train_all_pred = \
-        predict_and_evaluate_dfs(best_model[0], sampled_train_x_df, sampled_train_y_df,
-                                 rawpop_upper_bounds=rawpop_upper_bound_dict,
-                                 normaliser=best_model[1], eval_type='prfs', features_col=feature_col,
-                                 return_modified_df=True)
+    if rank_quantile is None:
+        train_y_pred, train_y_eval, train_pred_positive_df, train_actual_positive_df, train_all_pred = \
+            predict_and_evaluate_dfs(best_model[0], sampled_train_x_df, sampled_train_y_df,
+                                     rawpop_upper_bounds=rawpop_upper_bound_dict, skills_to_keep=skills_to_keep,
+                                     normaliser=best_model[1], eval_type=eval_type, features_col=feature_col,
+                                     return_modified_df=True)
+    else:
+        train_y_pred, train_y_eval, train_pred_positive_df, train_actual_positive_df, train_all_pred = \
+            predict_and_binarise_to_evaluate(best_model[0], sampled_train_x_df, sampled_train_y_df,
+                                             eligible_skills[0], rank_quantile[0], skills_to_keep=skills_to_keep,
+                                             features_col=feature_col, normaliser=best_model[1],
+                                             eval_type=eval_type, return_modified_df=True)
+
 
     results_to_return['train_unagg'] = train_y_eval
 
@@ -878,42 +1047,47 @@ def test_eval_for_wrapped_results(df_x_datapoints_with_ground_truth, df_y_all,
 
     results_to_return['train_baseline_unagg'] = train_baseline_eval
 
-    if verbose:
-        print('**********Training set, aggregated')
+    if do_agg_eval:
+        if verbose:
+            print('**********Training set, aggregated')
 
-    train_y_pred, train_y_eval, train_pred_positive_df, train_actual_positive_df, train_all_pred = \
-        predict_and_evaluate_dfs(best_model[0], sampled_train_x_df, sampled_train_y_df,
-                                 rawpop_upper_bounds=rawpop_upper_bound_dict,
-                                 normaliser=best_model[1], eval_type='prfs', features_col=feature_col,
-                                 return_modified_df=True, aggregate_for_skills=True)
+        train_y_pred, train_y_eval, train_pred_positive_df, train_actual_positive_df, train_all_pred = \
+            predict_and_evaluate_dfs(best_model[0], sampled_train_x_df, sampled_train_y_df,
+                                     rawpop_upper_bounds=rawpop_upper_bound_dict,
+                                     normaliser=best_model[1], eval_type=eval_type, features_col=feature_col,
+                                     return_modified_df=True, aggregate_for_skills=True)
 
-    results_to_return['train_agg'] = train_y_eval
+        results_to_return['train_agg'] = train_y_eval
 
-    if verbose:
-        print(train_y_pred, train_y_eval, train_pred_positive_df, train_actual_positive_df)
+        if verbose:
+            print(train_y_pred, train_y_eval, train_pred_positive_df, train_actual_positive_df)
 
-    if verbose:
-        print('-----------Baseline-----------')
-    agg_test_gt = sampled_train_y_df[['Skills', 'row_class']].groupby('Skills'). \
-        apply(lambda x: 1 if x['row_class'].sum() > 0 else 0) \
-        .values
-    train_baseline_eval = evaluate_results(np.array([1] * len(sampled_train_y_df.Skills.unique())), agg_test_gt
-                                           , eval_type='prfs')
-    if verbose:
-        print(train_baseline_eval)
+        if verbose:
+            print('-----------Baseline-----------')
+        agg_test_gt = sampled_train_y_df[['Skills', 'row_class']].groupby('Skills'). \
+            apply(lambda x: 1 if x['row_class'].sum() > 0 else 0) \
+            .values
+        train_baseline_eval = evaluate_results(np.array([1] * len(sampled_train_y_df.Skills.unique())), agg_test_gt
+                                               , eval_type=eval_type)
+        if verbose:
+            print(train_baseline_eval)
 
-    results_to_return['train_baseline_agg'] = train_baseline_eval
+        results_to_return['train_baseline_agg'] = train_baseline_eval
 
     if baselines_to_test is not None:
         for baseline_name in baselines_to_test:
             current_baseline_positives = list(baselines_to_test[baseline_name])
             current_test_y = sampled_test_y_df.copy()
             if '_' in current_baseline_positives[0] and '-' in current_baseline_positives[0]:
-                current_test_y['pred'] = current_test_y.common_key.apply(lambda x: x in current_baseline_positives)
+                current_test_y['pred'] = current_test_y.common_key.apply(lambda x:
+                                                             1 if x in current_baseline_positives else 0)
             else:
-                current_test_y['pred'] = current_test_y.Skills.apply(lambda x: x in current_baseline_positives)
+                current_test_y['pred'] = current_test_y.Skills.apply(lambda x:
+                                                             1 if x in current_baseline_positives else 0)
+            # if skills_to_keep is not None:
+            #     current_test_y = current_test_y.loc[current_test_y.common_key.apply(lambda x: x in skills_to_keep)]
             results_to_return[baseline_name] = \
-                evaluate_results(current_test_y.pred.values, current_test_y.row_class.values, eval_type='prfs')
+                evaluate_results(current_test_y.pred.values, current_test_y.row_class.values, eval_type=eval_type)
     if not return_pred_df:
         return results_to_return
     else:
@@ -922,20 +1096,38 @@ def test_eval_for_wrapped_results(df_x_datapoints_with_ground_truth, df_y_all,
 
 def interpret_model(clf_model, feature_names, feature_scores=None,
                     pca_model=None, n_features=None, dataframes=None, normaliser=None):
-    if feature_scores is None:
-        scores = [-clf_model.intercept_[0]] + clf_model.coef_.flatten().tolist()
+    if hasattr(clf_model, 'intercept_'):
+        if feature_scores is None:
+            if isinstance(clf_model.intercept_, list):
+                scores = [-clf_model.intercept_[0]] + clf_model.coef_.flatten().tolist()
+            else:
+                scores = [-clf_model.intercept_] + clf_model.coef_.flatten().tolist()
+        else:
+            if isinstance(clf_model.intercept_, list):
+                scores = [-clf_model.intercept_[0]] + feature_scores.flatten().tolist()
+            else:
+                scores = [-clf_model.intercept_] + feature_scores.flatten().tolist()
     else:
-        scores = [-clf_model.intercept_[0]] + feature_scores.flatten().tolist()
+        if feature_scores is None:
+            scores = clf_model.coef_.flatten().tolist()
+        else:
+            scores = feature_scores.flatten().tolist()
     if pca_model is None:
-        names = ['s_min']+feature_names
+        names = feature_names
+        if hasattr(clf_model, 'intercept_'):
+            names = ['s_min']+names
         interpretation_df = pd.DataFrame({'Name': names,
                                           'Score': scores})
     else:
-        names = ['s_min']+list(range(len(clf_model.coef_.flatten())))
+        names = list(range(len(clf_model.coef_.flatten())))
+        if hasattr(clf_model, 'intercept_'):
+            names = ['s_min'] + names
         og_names = feature_names
-        features_list = ['None'] + [[(og_names[i], pca_model.components_[j,i])
+        features_list = [[(og_names[i], pca_model.components_[j,i])
                                         for i in (np.argsort(np.abs(pca_model.components_[j,:]).flatten()))[-20:]][::-1]
                                            for j in range(pca_model.components_.shape[0])]
+        if hasattr(clf_model, 'intercept_'):
+            features_list = ['None'] + features_list
         interpretation_df = pd.DataFrame({'Name': names,
                           'Score': scores,
                           'Features': features_list})

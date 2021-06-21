@@ -172,7 +172,7 @@ def tsfresh_jobpostings(df, y_col='Job Postings', normaliser=None, smooth=None, 
 
 
 def extract_timeseries_features(df, y_col='Job Postings', extraction_methods=FEATURES_TO_COMPUTE,
-                                normaliser=None, smooth='exp', params=None):
+                                normaliser=None, smooth='exp', params=None, length_to_keep=None):
     """
     Extracts (multiple types of) features for one skill's time series and returns them as a list of vectors.
 
@@ -192,6 +192,10 @@ def extract_timeseries_features(df, y_col='Job Postings', extraction_methods=FEA
             Method-specific parameters should already be provided in the dict given to the wrapper function.
     :return: Returns a list of feature vectors generated for that skill.
     """
+    if length_to_keep is not None:
+        df = df.sort_values('Date').tail(length_to_keep)
+        if normaliser is not None:
+            normaliser = normaliser.sort_values('Date').tail(length_to_keep)
     results = list()
     for extraction_method in extraction_methods:
         current_params = params[extraction_method]
@@ -260,7 +264,8 @@ def get_skill_pop_time_series(df, pop_type, params=None, y_col='Job Postings Raw
 
 def skill_trend_features_wrapper(df, starting_date, end_date, total_values, min_freq=1,
                                  feature_types=FEATURES_TO_COMPUTE,
-                                 nafill='zero', pop_type='log', smoothing=None, params=None, weights=None):
+                                 nafill='zero', pop_type='log', smoothing=None, params=None,
+                                 weights=None, length_to_keep=None):
     """
 
     :param df: The dataframe. It dataframe needs to have the columns 'Date', 'Skill', and
@@ -300,7 +305,8 @@ def skill_trend_features_wrapper(df, starting_date, end_date, total_values, min_
                                  groupby('Skill').apply(lambda x:
                                     extract_timeseries_features(x, extraction_methods=feature_types, normaliser=
                                            get_period_of_time(total_values, starting_date,
-                                                              end_date), smooth=smoothing, params=params)))
+                                                              end_date), smooth=smoothing, params=params,
+                                                                length_to_keep=length_to_keep)))
     for i in range(len(feature_types)):
         feature_type = feature_types[i]
         df_with_trends_pooled[feature_type] = df_with_trends_pooled[0].apply(lambda x: x[i])
@@ -322,7 +328,8 @@ def skill_trend_features_wrapper(df, starting_date, end_date, total_values, min_
     return df_with_trends_pooled.join(skills_raw_sums)
 
 def compile_all_feature_dfs(df, time_periods, total_values, min_freq=1, feature_types=FEATURES_TO_COMPUTE,
-                                 nafill='zero', pop_type='log', smoothing='movingavg', params=None, weights=None):
+                                 nafill='zero', pop_type='log', smoothing='movingavg', params=None, weights=None,
+                                    length_to_keep=None):
     """
     Creates a dictionary mapping each period's name (keys of time_periods) to the feature dataframe for that period.
     For details on the arguments, look at skill_trend_features_wrapper.
@@ -338,7 +345,8 @@ def compile_all_feature_dfs(df, time_periods, total_values, min_freq=1, feature_
         time_period = time_periods[time_period_key]
         results[time_period_key] = skill_trend_features_wrapper(df, time_period[0], time_period[1],
                                  total_values, min_freq=min_freq, feature_types=feature_types,
-                                 nafill=nafill, pop_type=pop_type, smoothing=smoothing, params=params, weights=weights)
+                                 nafill=nafill, pop_type=pop_type, smoothing=smoothing, params=params, weights=weights,
+                                                                length_to_keep=length_to_keep)
     return results
 
 
@@ -454,8 +462,10 @@ def remove_selected_features(log_features_df, feature_names, colname='tsfresh',
 
 
 
-def clean_nan_features(df_dict, colname='tsfresh', feature_names=None):
+def clean_nan_features(df_dict, colname='tsfresh', feature_names=None, keys_to_use=None):
     dict_keys = list(df_dict.keys())
+    if keys_to_use is not None:
+        dict_keys = list(keys_to_use)
     features_matrix = np.vstack([series_to_matrix(df_dict[k][colname]) for k in dict_keys])
     non_nan_and_nonzero_variance_cols = \
         (~np.any(np.isnan(features_matrix), axis=0)) & (~np.any(np.isinf(features_matrix), axis=0) &
