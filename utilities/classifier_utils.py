@@ -1084,8 +1084,8 @@ def test_eval_for_wrapped_results(df_x_datapoints_with_ground_truth, df_y_all,
             else:
                 current_test_y['pred'] = current_test_y.Skills.apply(lambda x:
                                                              1 if x in current_baseline_positives else 0)
-            # if skills_to_keep is not None:
-            #     current_test_y = current_test_y.loc[current_test_y.common_key.apply(lambda x: x in skills_to_keep)]
+            if skills_to_keep is not None:
+                current_test_y = current_test_y.loc[current_test_y.common_key.apply(lambda x: x in skills_to_keep)]
             results_to_return[baseline_name] = \
                 evaluate_results(current_test_y.pred.values, current_test_y.row_class.values, eval_type=eval_type)
     if not return_pred_df:
