@@ -1,5 +1,4 @@
 import pickle
-import sys
 import os
 from pyspark import SparkConf, SparkContext
 import re
@@ -33,31 +32,32 @@ def get_tags(tags_list):
     return result_list
 
 def main():
-    usage_str = 'Extract the number of new questions created on each tag per week' \
-                ' and saves the results in a matrix.\n' \
-                'Args:\n' \
-                '1. HDFS address of posts xml file.\n' \
-                '2. Output dir (non-HDFS).\n' \
-                '3. Directory of tag list file (text file containing the tags to get).\n' \
-                '4. Starting date for the time series.\n' \
-                '5. Ending date for the time series. Actual ending date is determined by the number of weeks.\n'
-    if len(sys.argv) != 6:
-        print(usage_str)
-        return
+    """Creates a dataframe of tags' monthly question counts
+    for the tags provided in a file and for the provided time period."""
 
-    input_posts_file = sys.argv[1]
-    output_dir = sys.argv[2]
-    tags_list_filename = sys.argv[3]
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--posts', type=str, required=True)
+    parser.add_argument('--output_dir', type=str, required=True)
+    parser.add_argument('--tags_list', type=str, required=True)
+    parser.add_argument('--start_date', type=str, required=True)
+    parser.add_argument('--end_date', type=str, required=True)
+    args = parser.parse_args()
+
+    dt_format='%Y-%m'
+
+    input_posts_file = args.posts
+    output_dir = args.output_dir
+    tags_list_filename = args.tags_list
+    start_date = get_datetime(args.start_date,dt_format)
+    end_date = get_datetime(args.end_date,dt_format)
+
     tags_list = open(tags_list_filename, 'r').readlines()
     tags_list = [x.strip() for x in tags_list]
     tags_list = [x for x in tags_list if x != '']
-    dt_format='%Y-%m'
-    start_date = get_datetime(sys.argv[4],dt_format)
-    end_date = get_datetime(sys.argv[5],dt_format)
 
-    conf = SparkConf().set("spark.driver.maxResultSize", "25G"). \
+    conf = SparkConf().set("spark.driver.maxResultSize", "10G"). \
         set("spark.hadoop.validateOutputSpecs", "false"). \
-        set('spark.default.parallelism', '400')
+        set('spark.default.parallelism', '200')
 
     spark = SparkContext(conf=conf)
 
